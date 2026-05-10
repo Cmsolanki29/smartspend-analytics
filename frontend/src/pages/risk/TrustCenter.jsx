@@ -144,8 +144,8 @@ function AdvancedPhasesPanel({ userId }) {
       color: "#0ea5e9",
       label: "Phase 10 · GNN",
       badge: "2026",
-      status: gnn !== null ? gnn.enabled : null,
-      statusLabel: gnn === null ? "Unavailable" : gnn.enabled ? "Enabled" : "Disabled",
+      status: gnn !== null ? gnn.feature_flag_enabled : null,
+      statusLabel: gnn === null ? "Unavailable" : gnn.feature_flag_enabled ? "Enabled" : "Disabled",
       detail: gnn
         ? `GraphSAGE · ${gnn.embed_dim ?? 64}-dim · ${gnn.training_days ?? 90}-day window`
         : "Backend offline",
