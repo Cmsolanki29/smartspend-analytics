@@ -10,6 +10,9 @@ backend/mlflow.db
 backend/mlflow.db-journal
 backend/mlruns/
 backend/models/*.pkl
+# Phase 11 model weights (CTO rule: never commit weights — use MLflow / disk path).
+backend/models/*.pt
+backend/models/fraud_dnn_*.json
 *.pkl
 
 # IDE / OS

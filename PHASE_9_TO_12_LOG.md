@@ -243,9 +243,97 @@ PHASE_10_SUPERVISED_LOSS_WEIGHT=0.3
   and PII-free, so leaving them in place is safe.
 
 ## Phase 11 — DNN Migration Path
-**Status:** queued.
-Multi-branch DNN inspired by Stripe Radar, shadow-deployed via Phase 5
-MLflow.  Promote only after 24 h of non-regression on every segment.
+
+**Status:** ✅ Implemented (this milestone)
+**Closes gap to:** Stripe Radar (DNN-only since 2022).
+
+### What it does
+Trains a **multi-branch DNN** (Stripe's "Network-in-Neuron" pattern — 4
+parallel MLP branches whose logits are summed) on the *exact same*
+18-feature vector that XGBoost uses today.  By default the DNN is a
+SHADOW model:
+
+1. `PHASE_11_DNN_ENABLED=true` → the DNN's score is computed in parallel
+   with XGBoost and logged through the existing Phase 5 `shadow_logger`,
+   so `evaluate_shadow()` runs the segment-regression + PSI checks
+   directly against the DNN.  It does **not** influence the served risk
+   score in this mode.
+2. `PHASE_11_DNN_PROMOTED=true` *additionally* allows the DNN
+   probability to blend into the production score with weight
+   `PHASE_11_DNN_BLEND_WEIGHT` (default 0.5 — true ensemble).
+
+This two-flag promotion gate is deliberate: a freshly trained DNN can
+never silently replace XGBoost.  Rollback is one env-var flip away.
+
+### Architecture
+| Component | Choice | Why |
+| --- | --- | --- |
+| Framework | Pure PyTorch (CPU) | No `torch_geometric` / no GPU — checkout-and-run. |
+| Branches | 4 × `Linear(d→128) → ReLU → Drop → Linear(128→64) → ReLU → Drop → Linear(64→1)` | ResNeXt / Stripe pattern; gives GBDT-like ensemble behaviour while staying differentiable. |
+| Loss | `BCEWithLogitsLoss` with class-balanced `pos_weight` | Numerically stable; auto-handles imbalance. |
+| Optimiser | Adam, `lr=1e-3`, `weight_decay=1e-5` | Standard tabular DNN choice. |
+| Split | Time-based 70 / 15 / 15 | Prevents future-leak. |
+| Scaler | Per-feature mean/std fitted on **train only**, saved inside the `.pt` file | Removes train/serve skew at inference time. |
+| Storage | `models/fraud_dnn_v1.pt` + sidecar `.json` | Source of truth; no MLflow dependency required. |
+
+### Label sourcing — honest waterfall
+The trainer prefers labels in this order and records the choice in
+`dnn_training_runs.label_source`:
+
+1. `transactions.is_fraud = TRUE` if ≥ 5 positives.
+2. `transactions.anomaly_flag = TRUE` if ≥ 5 positives.
+3. Synthetic fraud (same `generate_synthetic_fraud` the bootstrap uses).
+
+Empirical result on this branch: **0 real `is_fraud`, 181 anomaly_flag,
+~5 000 synthetic** is what the `.pt` is trained on right now.  See
+`backend/models/cards/fraud_dnn_v1.md` for the full honesty section.
+
+### Files added
+```
+backend/database/migrations/011_phase11_dnn.sql
+backend/services/phase_11_dnn/__init__.py
+backend/services/phase_11_dnn/dnn_model.py
+backend/services/phase_11_dnn/trainer.py
+backend/services/phase_11_dnn/inference.py
+backend/routes/dnn.py
+backend/models/cards/fraud_dnn_v1.md
+backend/tests/test_phase11_dnn.py
+```
+
+### Files modified
+```
+backend/core/config.py            (Phase 11 settings block)
+backend/main.py                   (register /api/risk/dnn router)
+backend/services/hybrid_scorer.py (DNN shadow + promoted-blend hooks)
+.env                              (Phase 11 flags)
+PHASE_9_TO_12_LOG.md              (this entry)
+```
+
+### API surface — `/api/risk/dnn/*`
+| Method | Path | Purpose | Auth |
+| --- | --- | --- | --- |
+| GET  | `/health`             | Feature flag, model_loaded | open |
+| POST | `/train`              | Train + persist a fresh DNN | `X-Admin-Token` |
+| GET  | `/status`             | Cached snapshot + last `dnn_training_runs` row | admin |
+| GET  | `/runs`               | Recent training runs (paged) | admin |
+| POST | `/reload`             | Drop in-process model cache | admin |
+| GET  | `/shadow/evaluation`  | Phase 5 segment-regression + PSI on shadow_predictions | admin |
+| POST | `/predict`            | Sandbox a feature dict | admin |
+
+### Honest caveats
+* **At the current label volume** (0 real fraud, 181 anomaly proxy) any
+  test PR-AUC ≥ 0.85 is academic: the synthetic generator inserts
+  patterns the model can trivially learn.  This is documented in the
+  model card and surfaced via `label_source` on every training run.
+* **DNNs do not beat XGBoost on tabular data at this scale.**  The
+  *architecture* is the deliverable; production accuracy claims have to
+  wait on real labels (Phase 8 flywheel) and a clean `evaluate_shadow()`
+  pass.
+
+### Rollback
+* Soft: `PHASE_11_DNN_ENABLED=false` (instant; hot-reload picks it up).
+* Hard: `git revert <phase-11 commit>`.  `dnn_training_runs` is
+  append-only and PII-free.
 
 ## Phase 12 — Multi-Model Orchestrator (LLM-as-Judge)
 **Status:** queued.

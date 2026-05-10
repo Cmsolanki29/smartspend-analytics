@@ -165,6 +165,37 @@ class Settings(BaseSettings):
     # signal is unsupervised contrastive when labels are sparse.
     PHASE_10_SUPERVISED_LOSS_WEIGHT: float = 0.3
 
+    # ------------------------------------------------------------------ #
+    # Phase 11 — Multi-branch DNN (Stripe Radar-style migration path)
+    # ------------------------------------------------------------------ #
+    # Master switch: when False, the DNN is a complete no-op.  Even when
+    # True, the DNN is initially deployed as a SHADOW model — its score
+    # is logged via the existing Phase 5 shadow_logger and NEVER served
+    # to end users until 24h of regression-free data accumulates.
+    PHASE_11_DNN_ENABLED: bool = False
+    # The "promoted" flag flips the DNN from shadow to active production.
+    # We default it to False so a freshly-trained DNN never silently
+    # replaces XGBoost — promotion is a deliberate admin action.
+    PHASE_11_DNN_PROMOTED: bool = False
+    # Shadow-mode blending weight (used only when DNN is promoted).  At
+    # promotion time it starts at 0.5 (true ensemble) and can be raised
+    # to 1.0 once segment-regression checks remain green.
+    PHASE_11_DNN_BLEND_WEIGHT: float = 0.5
+    # Architecture
+    PHASE_11_DNN_BRANCHES: int = 4
+    PHASE_11_DNN_HIDDEN: int = 128
+    PHASE_11_DNN_DROPOUT: float = 0.15
+    # Training
+    PHASE_11_DNN_EPOCHS: int = 40
+    PHASE_11_DNN_BATCH_SIZE: int = 256
+    PHASE_11_DNN_LR: float = 1e-3
+    PHASE_11_DNN_WEIGHT_DECAY: float = 1e-5
+    # Where the trained model lives (PyTorch state-dict + JSON sidecar).
+    PHASE_11_DNN_MODEL_PATH: str = "models/fraud_dnn_v1.pt"
+    # Refuse to train if positive count below this — DNNs overfit
+    # fastest on tiny positive sets.
+    PHASE_11_MIN_POSITIVES_FOR_TRAINING: int = 20
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

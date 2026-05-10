@@ -167,6 +167,27 @@ class HybridScorer:
         if self._shadow_model is not None and features is not None:
             shadow_score = self._run_supervised_with_model(self._shadow_model, features)
 
+        # ── Phase 11: DNN shadow scoring ────────────────────────────────
+        # When PHASE_11_DNN_ENABLED=true and a trained .pt file exists,
+        # the DNN's probability becomes the shadow score (overrides any
+        # XGBoost shadow above) so Phase 5's evaluate_shadow() runs the
+        # 24h regression check against the DNN.  The DNN result is NEVER
+        # served to the end user unless PHASE_11_DNN_PROMOTED is also on,
+        # which is handled in _score_sync below.
+        try:
+            if features is not None:
+                from services.phase_11_dnn import inference as _dnn_inf
+                if _dnn_inf.is_enabled():
+                    dnn_prob = _dnn_inf.predict_proba(features)
+                    if dnn_prob is not None:
+                        shadow_score = float(dnn_prob) * 100.0
+                        # Surface in signals so the UI can show it.
+                        if isinstance(prod_result.signals, dict):
+                            prod_result.signals["dnn_shadow_score"] = round(shadow_score, 2)
+                            prod_result.signals["dnn_shadow_source"] = "phase_11"
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("hybrid_scorer: DNN shadow scoring skipped: %s", exc)
+
         return prod_result, shadow_score
 
     async def score(
@@ -383,6 +404,23 @@ class HybridScorer:
         else:
             blended = unsup_score
 
+        # ── Phase 11: DNN promoted-mode blending ────────────────────────
+        # Only applies when *both* PHASE_11_DNN_ENABLED and
+        # PHASE_11_DNN_PROMOTED are true.  In shadow mode the DNN does
+        # not influence the served score at all.
+        dnn_blend_used = False
+        try:
+            from services.phase_11_dnn import inference as _dnn_inf
+            if _dnn_inf.is_promoted() and features is not None:
+                dnn_prob = _dnn_inf.predict_proba(features)
+                if dnn_prob is not None:
+                    w = float(getattr(settings, "PHASE_11_DNN_BLEND_WEIGHT", 0.5))
+                    w = min(max(w, 0.0), 1.0)
+                    blended = (1.0 - w) * blended + w * float(dnn_prob)
+                    dnn_blend_used = True
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("hybrid_scorer: DNN promoted blend skipped: %s", exc)
+
         # Scale to 0-100
         final_risk_score = int(round(min(max(blended * 100, 0), 100)))
         risk_level = _risk_level(final_risk_score, settings)
@@ -395,6 +433,9 @@ class HybridScorer:
             signals["sup_score_raw"] = round(sup_score, 4)
             signals["unsup_score_raw"] = round(unsup_score, 4)
             signals["blend"] = f"{int(settings.UNSUP_WEIGHT*100)}%unsup+{int(settings.SUP_WEIGHT*100)}%sup"
+        if dnn_blend_used:
+            w_pct = int(round(settings.PHASE_11_DNN_BLEND_WEIGHT * 100))
+            signals["dnn_blend"] = f"promoted_{w_pct}%"
 
         # ── Phase 10: surface the GNN embedding as a signal (no blending).
         gnn_emb = txn.get("_gnn_embedding") if isinstance(txn, dict) else None
