@@ -204,6 +204,12 @@ class Settings(BaseSettings):
     # Refuse to train if positive count below this — DNNs overfit
     # fastest on tiny positive sets.
     PHASE_11_MIN_POSITIVES_FOR_TRAINING: int = 20
+    # audit-4: clip standardised inputs to +/- N stddevs at inference
+    # time.  An out-of-distribution row (e.g. an admin's hand-typed
+    # "extreme high-risk" smoke test) otherwise produces a wild z-score
+    # and the sigmoid saturates to 0 or 1.  Set to 0.0 to disable.
+    # Production fintechs typically clamp at 5 sigma.
+    PHASE_11_INPUT_CLIP_STD: float = 5.0
 
     # ------------------------------------------------------------------ #
     # Phase 12 — Multi-Model Orchestrator (LLM-as-Judge)

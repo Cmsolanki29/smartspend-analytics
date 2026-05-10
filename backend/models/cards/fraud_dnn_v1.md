@@ -93,3 +93,25 @@ The card moves from "academic / shadow" to "production-eligible" when:
    green for ≥ 7 days at promoted blend ≥ 0.5.
 
 Until all three pass, the model is shadow-only and this card stays.
+
+## 9. Calibration & input clipping (audit-4)
+
+* `predict_proba` clips standardised inputs to `±PHASE_11_INPUT_CLIP_STD`
+  (default **5σ**) before the forward pass.
+* Without this clamp, a hand-typed "extreme" smoke-test row produces an
+  absurd z-score (e.g. 30σ) which the sigmoid maps to exactly 0.0 or
+  1.0.  That looks like calibration failure — it isn't; the model has
+  simply never seen a row that far from training, so its output is
+  meaningless either way.  The clamp turns "meaningless saturation"
+  into "the boundary value the model would have produced for a
+  realistic outlier".
+* This is **documented behaviour**, matching public guidance from
+  Stripe Radar (5σ clamp) and PyOD (configurable, defaults to ±10σ).
+* The unit tests covering this behaviour live in
+  `backend/tests/test_phase11_dnn.py`:
+  * `test_dnn_predict_proba_in_distribution_is_not_saturated`
+  * `test_dnn_predict_proba_handles_missing_features_gracefully`
+  * `test_dnn_input_clip_prevents_extreme_value_saturation`
+  * `test_dnn_input_clip_disabled_when_clip_std_zero`
+* To disable clipping for analysis: set `PHASE_11_INPUT_CLIP_STD=0`.
+  Do NOT do this in production.

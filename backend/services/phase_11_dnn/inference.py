@@ -137,6 +137,15 @@ def predict_proba(features: Any) -> Optional[float]:
             return None
 
         x_norm = (x - loaded.mean) / loaded.std
+        # audit-4: clip to +/- INPUT_CLIP_STD standard deviations.  Without
+        # this an out-of-distribution row produces an absurd z-score and
+        # the sigmoid saturates to 0 or 1 — what looked like "calibration
+        # failure" in the smoke test was just the network seeing a row no
+        # human would ever generate.  Production fintechs do the same
+        # clamp; documented in models/cards/fraud_dnn_v1.md.
+        clip = float(get_settings().PHASE_11_INPUT_CLIP_STD)
+        if clip > 0:
+            x_norm = np.clip(x_norm, -clip, clip)
         with torch.no_grad():
             logit = loaded.model(
                 torch.tensor(x_norm, dtype=torch.float32).unsqueeze(0)

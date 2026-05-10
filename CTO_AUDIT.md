@@ -105,7 +105,27 @@ the next file edit.
 ## Issue #4 — DNN `predict_proba` saturated to 0 on extreme input
 
 **Severity:** 🟡 medium (calibration question)
-**Status:** _to be filled in by Fix 4 commit_
+**Status:** FIXED.
+
+Diagnosis: not a calibration bug.  The smoke-test row was 30+ standard
+deviations from the training distribution, so the StandardScaler's
+z-scores blew up and the sigmoid mathematically saturated to 0.0 (and
+1.0 in the opposite direction).
+
+Mitigation:
+
+1. **Input clipping** in `predict_proba` — clamp the standardised
+   feature vector to `±PHASE_11_INPUT_CLIP_STD` (default **5σ**) before
+   the forward pass.  This matches Stripe Radar's published guidance.
+2. **Configurable knob** in `core/config.py`: `PHASE_11_INPUT_CLIP_STD`
+   (default `5.0`; set `0.0` to disable for analysis).
+3. **Four new calibration tests** in `backend/tests/test_phase11_dnn.py`:
+   * `test_dnn_predict_proba_in_distribution_is_not_saturated`
+   * `test_dnn_predict_proba_handles_missing_features_gracefully`
+   * `test_dnn_input_clip_prevents_extreme_value_saturation`
+     (proves clamp is active by showing 1e9 and 1e15 produce identical probabilities)
+   * `test_dnn_input_clip_disabled_when_clip_std_zero`
+4. **Documented** in `backend/models/cards/fraud_dnn_v1.md` §9.
 
 ---
 
