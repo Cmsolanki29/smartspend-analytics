@@ -11,9 +11,10 @@
 
 import axios from "axios";
 import { getAccessToken } from "./api";
+import { getApiBaseUrl } from "./apiBaseUrl";
 
 const ADMIN_TOKEN = process.env.REACT_APP_ADMIN_TOKEN || "dev-admin-secret";
-const BASE = process.env.REACT_APP_API_URL || "http://localhost:8001/api";
+const BASE = getApiBaseUrl();
 
 // ── Axios client for regular JWT-authenticated risk calls ──────────────────
 const riskClient = axios.create({ baseURL: BASE, timeout: 8000 });
@@ -43,7 +44,7 @@ const d = (res) => res.data;
 
 // ── Phase 1 — Real-time event health ──────────────────────────────────────
 // Backend health endpoint lives at GET /health (no /api prefix).
-// Derive the backend root from REACT_APP_API_URL (strips trailing /api).
+// Backend health lives at GET /health (no /api prefix). Strip trailing /api from API base.
 const _BACKEND_ROOT = BASE.replace(/\/api\/?$/, "");
 export const riskHealth = () =>
   axios.get(`${_BACKEND_ROOT}/health`, { timeout: 5000 })

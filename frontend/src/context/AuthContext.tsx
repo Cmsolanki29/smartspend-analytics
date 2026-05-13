@@ -36,13 +36,18 @@ export type SignupPayload = {
   password: string;
 };
 
+type LoadMeOptions = {
+  /** When true, throw if tokens exist but /auth/me (and refresh) cannot load the user. */
+  throwOnSessionError?: boolean;
+};
+
 export type AuthContextValue = {
   user: AuthUser;
   loading: boolean;
   signin: (email: string, password: string) => Promise<void>;
   signup: (payload: SignupPayload) => Promise<void>;
   logout: () => Promise<void>;
-  reloadUser: () => Promise<void>;
+  reloadUser: (options?: LoadMeOptions) => Promise<void>;
   isAuthenticated: boolean;
 };
 
@@ -52,10 +57,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser>(null);
   const [loading, setLoading] = useState(true);
 
-  const loadMe = useCallback(async () => {
+  const loadMe = useCallback(async (options?: LoadMeOptions) => {
     const token = getAccessToken();
     if (!token) {
       setUser(null);
+      if (options?.throwOnSessionError) {
+        throw new Error("Session was not established. Please try again.");
+      }
       return;
     }
     try {
@@ -76,6 +84,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
       clearAuthTokens();
       setUser(null);
+      if (options?.throwOnSessionError) {
+        throw new Error("Could not verify your session. Check that the API is running, then try signing in.");
+      }
     }
   }, []);
 
@@ -100,7 +111,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       } catch {
         /* ignore */
       }
-      await loadMe();
+      await loadMe({ throwOnSessionError: true });
     },
     [loadMe]
   );
@@ -114,7 +125,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       } catch {
         /* ignore */
       }
-      await loadMe();
+      await loadMe({ throwOnSessionError: true });
     },
     [loadMe]
   );

@@ -9,8 +9,9 @@ from typing import Any
 
 import os
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from db import get_db, test_db_connection
 from models.schemas import (
@@ -26,14 +27,17 @@ from routes import (
     anomaly,
     auth,
     dark_patterns,
+    emi_affordability_check,
     emi_detector,
     festival_important_days,
     festival_predictor,
+    financial_state,
     fraud_shield,
     health_score,
     insights,
     onboarding,
     otp,
+    pattern_alerts,
     purchase_planner,
     subscription_graveyard,
     transactions,
@@ -103,6 +107,45 @@ async def lifespan(app: FastAPI):
         except Exception as _e:
             print(f"[RiskEngine] Background tasks skipped: {_e}")
 
+    if os.getenv("PATTERN_ALERT_CRON", "0") == "1":
+        async def _pattern_alert_loop() -> None:
+            from db import get_connection
+            from services.pattern_predictor import (
+                expire_stale_alerts,
+                predict_upcoming_charges,
+                upsert_pattern_alerts,
+            )
+
+            await asyncio.sleep(120)
+            while True:
+                try:
+
+                    def _scan_once() -> None:
+                        cnx = get_connection()
+                        try:
+                            expire_stale_alerts(cnx)
+                            cur = cnx.cursor()
+                            cur.execute("SELECT id FROM users")
+                            uids = [r[0] for r in cur.fetchall()]
+                            cur.close()
+                            for uid in uids:
+                                pr = predict_upcoming_charges(cnx, uid)
+                                upsert_pattern_alerts(cnx, pr)
+                            cnx.commit()
+                        except Exception as exc:
+                            cnx.rollback()
+                            print(f"[pattern-alerts] scan error: {exc}")
+                        finally:
+                            cnx.close()
+
+                    await asyncio.to_thread(_scan_once)
+                except Exception as exc:
+                    print(f"[pattern-alerts] loop: {exc}")
+                await asyncio.sleep(6 * 3600)
+
+        asyncio.create_task(_pattern_alert_loop())
+        print("Pattern alert cron enabled (PATTERN_ALERT_CRON=1, every 6h).")
+
     yield
 
     # ── Phase 1-8 shutdown ─────────────────────────────────────────────────
@@ -125,6 +168,7 @@ app = FastAPI(
 _origins = os.getenv(
     "CORS_ORIGINS",
     "http://localhost:3000,http://127.0.0.1:3000,"
+    "http://localhost:3001,http://127.0.0.1:3001,"
     "http://localhost:3005,http://127.0.0.1:3005",
 ).strip()
 _allow_origins = [o.strip() for o in _origins.split(",") if o.strip()] or [
@@ -140,6 +184,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """Catch-all handler — never let an unhandled exception crash the server silently."""
+    import traceback
+    print(f"[GlobalError] {request.method} {request.url.path}: {type(exc).__name__}: {exc}")
+    traceback.print_exc()
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Internal server error: {type(exc).__name__}. Check backend logs."},
+    )
+
 app.include_router(auth.router, prefix="/api")
 app.include_router(onboarding.router, prefix="/api")
 app.include_router(otp.router, prefix="/api")
@@ -149,12 +205,15 @@ app.include_router(anomaly.router, prefix="/api")
 app.include_router(health_score.router, prefix="/api")
 app.include_router(insights.router, prefix="/api")
 app.include_router(emi_detector.router, prefix="/api")
+app.include_router(emi_affordability_check.router, prefix="/api")
 app.include_router(subscription_graveyard.router, prefix="/api")
 app.include_router(dark_patterns.router, prefix="/api")
 app.include_router(fraud_shield.router, prefix="/api")
 app.include_router(festival_important_days.router, prefix="/api")
 app.include_router(festival_predictor.router, prefix="/api")
 app.include_router(purchase_planner.router, prefix="/api")
+app.include_router(financial_state.router, prefix="/api")
+app.include_router(pattern_alerts.router, prefix="/api")
 
 # ── Phase 1-8 routers ──────────────────────────────────────────────────────
 if _RISK_ENGINE_OK:
@@ -231,6 +290,9 @@ def root() -> dict[str, Any]:
             "GET /api/insights/{user_id}/anomaly/{transaction_id}",
             "POST /api/insights/{user_id}/simulate",
             "GET /api/emi/{user_id}",
+            "POST /api/emi/{user_id}/affordability-check",
+            "POST /api/emi/{user_id}/affordability",
+            "POST /api/emi/{user_id}/calculate-impact",
             "POST /api/emi/{user_id}/scan",
             "GET /api/subscriptions/{user_id}",
             "GET /api/dark-patterns/{user_id}",
@@ -253,6 +315,8 @@ def root() -> dict[str, Any]:
             "POST /api/festivals/{user_id}/set-budget",
             "GET /api/purchases/{user_id}",
             "POST /api/purchases/{user_id}/add-goal",
+            "POST /api/purchases/{user_id}/{goal_id}/postpone",
+            "POST /api/purchases/{user_id}/goals/{goal_id}/postpone",
             "PUT /api/purchases/{user_id}/{goal_id}/update-savings",
             "DELETE /api/purchases/{user_id}/{goal_id}",
             "GET /api/dashboard/{user_id}",

@@ -14,6 +14,11 @@ import { apiUtils, getSubscriptions } from "../../services/api";
 import { useToast } from "../common/Toast";
 import { EmptyState } from "../common/EmptyState";
 import { ErrorCard } from "../common/ErrorCard";
+import { PageHeader } from "../Dashboard/shared/PageHeader";
+import { HeroKpiTile } from "../Dashboard/shared/HeroKpiTile";
+import { inr } from "../../lib/format";
+
+const ACCENT = "#F59E0B";
 
 const tabs = ["ALL", "ACTIVE", "SUSPICIOUS", "DEAD"];
 
@@ -107,25 +112,27 @@ const SubscriptionGraveyard = ({ userId }) => {
     );
   }
 
+  const deadCount       = (state.data?.subscriptions || []).filter((s) => s.status === "DEAD").length;
+  const suspiciousCount = (state.data?.subscriptions || []).filter((s) => s.status === "SUSPICIOUS").length;
+  const activeCount     = (state.data?.subscriptions || []).filter((s) => s.status === "ACTIVE").length;
+
   return (
     <div className="mx-auto max-w-5xl space-y-8 pb-4">
-      {/* Header */}
-      <div className="flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
-        <div>
-          <h1 className="mb-2 text-3xl font-bold tracking-tight text-white">Subscription Graveyard</h1>
-          <p className="max-w-lg text-sm leading-relaxed text-exiqo-glow/60">
-            Identify under-used plans and cut recurring waste—clear, calm, and data-backed.
-          </p>
-        </div>
-        <button
-          type="button"
-          onClick={load}
-          className="inline-flex shrink-0 items-center gap-2 self-start rounded-xl border border-exiqo-purple/35 bg-exiqo-dark/50 px-5 py-2.5 text-sm font-medium text-exiqo-glow transition hover:border-exiqo-purple/55 hover:bg-exiqo-purple/10 hover:text-white sm:self-auto"
-        >
-          <RefreshCw className="h-4 w-4" />
-          Refresh
-        </button>
-      </div>
+      <PageHeader
+        eyebrow="SUBSCRIPTIONS"
+        title="Kill the Waste"
+        subtitle="Find forgotten subscriptions and cancel them before they drain your wallet again next month."
+        accentHex={ACCENT}
+        rightSlot={
+          <HeroKpiTile
+            label="₹ wasted / year"
+            value={inr(annualWaste)}
+            caption={`${deadCount} dead · ${suspiciousCount} suspicious · ${activeCount} active`}
+            accentHex={ACCENT}
+            loading={state.loading}
+          />
+        }
+      />
 
       {/* Stats — one row on desktop, compact; color only */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 sm:gap-4">

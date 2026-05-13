@@ -12,8 +12,14 @@ export function useExplanation(txnId) {
   const [error, setError]     = useState(null);
 
   useEffect(() => {
-    if (!txnId) return;
+    if (!txnId) {
+      setData(null);
+      setLoading(false);
+      setError(null);
+      return;
+    }
     let cancelled = false;
+    setData(null);
     setLoading(true);
     setError(null);
 

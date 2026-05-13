@@ -37,7 +37,7 @@ const PurchaseDashboardWidget = ({ userId, onOpenPlanner }) => {
     return (
       <section className="glass-card purchase-dash-widget hover-glow feature-card">
         <div className="panel-head">
-          <h3>🛵 Purchase goal</h3>
+          <h3>Purchase goal</h3>
         </div>
         <p className="muted small" style={{ marginBottom: 10 }}>
           Loading purchase goals…
@@ -51,7 +51,7 @@ const PurchaseDashboardWidget = ({ userId, onOpenPlanner }) => {
     return (
       <section className="glass-card purchase-dash-widget hover-glow feature-card">
         <div className="panel-head">
-          <h3>🛵 Purchase goal</h3>
+          <h3>Purchase goal</h3>
         </div>
         <p className="muted small">No active goals yet.</p>
         <button type="button" className="btn-outline" onClick={onOpenPlanner}>
@@ -64,7 +64,7 @@ const PurchaseDashboardWidget = ({ userId, onOpenPlanner }) => {
   return (
     <section className="glass-card purchase-dash-widget hover-glow feature-card">
       <div className="panel-head">
-        <h3>🛵 {goal.item_name}</h3>
+        <h3>{goal.item_name}</h3>
       </div>
       <p>
         {fmt(goal.saved_amount)} / {fmt(goal.target_amount)} ({goal.progress_pct}%)

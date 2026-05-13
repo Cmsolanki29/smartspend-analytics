@@ -7,6 +7,11 @@ export type AuroraBackgroundProps = {
   /** Density of the starfield (0 = no stars). */
   starCount?: number;
   className?: string;
+  /**
+   * "full" — intro/splash depth (veil + vignette).
+   * "app" — lighter atmospheric stack behind opaque dashboard panels (less milky wash).
+   */
+  variant?: "full" | "app";
 };
 
 const BRAND_EASE = [0.22, 1, 0.36, 1] as const;
@@ -23,8 +28,10 @@ export function AuroraBackground({
   tone = "default",
   starCount = 48,
   className,
+  variant = "full",
 }: AuroraBackgroundProps) {
   const reduce = useReducedMotion();
+  const appShell = variant === "app";
 
   const stars = useMemo(
     () =>
@@ -57,7 +64,7 @@ export function AuroraBackground({
 
   return (
     <div
-      className={`pointer-events-none absolute inset-0 overflow-hidden ${className ?? ""}`}
+      className={`pointer-events-none absolute inset-0 z-0 overflow-hidden ${className ?? ""}`}
       aria-hidden
     >
       {/* Base gradient */}
@@ -83,8 +90,14 @@ export function AuroraBackground({
         transition={{ duration: 22, repeat: Infinity, ease: "easeInOut", delay: 1.4 }}
       />
 
-      {/* Soft veil */}
-      <div className="absolute inset-0 bg-gradient-to-b from-transparent via-transparent to-[#070418]/65" />
+      {/* Soft veil — toned down in app shell so opaque cards are not fighting a heavy wash */}
+      <div
+        className={
+          appShell
+            ? "absolute inset-0 bg-gradient-to-b from-transparent via-transparent to-[#070418]/22"
+            : "absolute inset-0 bg-gradient-to-b from-transparent via-transparent to-[#070418]/65"
+        }
+      />
 
       {/* Conic light wash */}
       <motion.div
@@ -124,7 +137,13 @@ export function AuroraBackground({
       )}
 
       {/* Vignette */}
-      <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_center,transparent_55%,rgba(7,4,24,0.6)_100%)]" />
+      <div
+        className={
+          appShell
+            ? "absolute inset-0 bg-[radial-gradient(ellipse_at_center,transparent_62%,rgba(7,4,24,0.22)_100%)]"
+            : "absolute inset-0 bg-[radial-gradient(ellipse_at_center,transparent_55%,rgba(7,4,24,0.6)_100%)]"
+        }
+      />
     </div>
   );
 }

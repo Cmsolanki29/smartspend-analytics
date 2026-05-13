@@ -384,8 +384,17 @@ def add_goal(user_id: int, body: AddGoalBody, conn=Depends(get_db)):
         ),
     )
     row = cur.fetchone()
+    goal_id_new = row[0] if row else None
     cur.close()
-    return _enrich_goal(conn, user_id, row)
+    result = _enrich_goal(conn, user_id, row)
+    # Fire cascade recalculation
+    try:
+        from services.financial_engine import recalculate_financial_state
+        recalculate_financial_state(conn, user_id, "purchase_goal_added", goal_id_new,
+                                    f"Purchase goal '{body.item_name}' added. Monthly pace: ₹{round(monthly_target,0):,.0f}/mo.")
+    except Exception:
+        pass
+    return result
 
 
 class UpdateSavingsBody(BaseModel):
@@ -425,6 +434,290 @@ def update_savings(user_id: int, goal_id: int, body: UpdateSavingsBody, conn=Dep
     row2 = cur.fetchone()
     cur.close()
     return _enrich_goal(conn, user_id, row2)
+
+
+class PostponeGoalBody(BaseModel):
+    new_target_date: str = Field(..., min_length=8, max_length=12)
+    reason: str = Field(default="", max_length=500)
+    festival_key: Optional[str] = Field(default=None, max_length=50)
+    display_timeline_label: Optional[str] = Field(default=None, max_length=80)
+
+
+class PostponeMonthsBody(BaseModel):
+    postpone_months: int = Field(..., ge=1, le=60)
+
+
+@router.post("/{user_id}/{goal_id}/postpone")
+def postpone_goal_by_months(user_id: int, goal_id: int, body: PostponeMonthsBody, conn=Depends(get_db)):
+    """
+    Shift goal target_date forward by N months; recompute monthly_target from remaining balance.
+
+    curl -s -X POST http://127.0.0.1:8001/api/purchases/1/2/postpone \\
+      -H "Content-Type: application/json" -d "{\\"postpone_months\\": 3}"
+    """
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM users WHERE id = %s;", (user_id,))
+    if not cur.fetchone():
+        cur.close()
+        raise HTTPException(404, "User not found")
+
+    cur.execute(
+        """
+        SELECT id, item_name, target_amount, saved_amount, target_date, monthly_target,
+               category, priority, status, best_buy_month, emi_vs_cash, sacrifice_plan
+        FROM purchase_goals
+        WHERE id = %s AND user_id = %s AND UPPER(COALESCE(status, '')) <> 'CANCELLED';
+        """,
+        (goal_id, user_id),
+    )
+    row = cur.fetchone()
+    if not row:
+        cur.close()
+        raise HTTPException(404, "Goal not found")
+
+    old_td = row[4] if isinstance(row[4], date) else datetime.strptime(str(row[4])[:10], "%Y-%m-%d").date()
+    target_amount_f = float(row[2] or 0)
+    saved_f = float(row[3] or 0)
+    remaining = max(0.0, target_amount_f - saved_f)
+    new_td = _add_months(old_td, body.postpone_months)
+    if new_td <= old_td:
+        cur.close()
+        raise HTTPException(400, "postpone_months must move target_date forward")
+
+    today = date.today()
+    months_rem = max(1, _months_between(today, new_td))
+    monthly_target = round(remaining / months_rem, 2)
+    emi_vs = json.dumps(_emi_cash_payload(target_amount_f))
+    gap = max(0.0, monthly_target - _avg_monthly_saved(conn, user_id))
+    sacrifice = json.dumps(_build_sacrifice_plan(conn, user_id, gap, monthly_target))
+
+    row2 = None
+    try:
+        cur.execute(
+            """
+            UPDATE purchase_goals
+            SET original_target_date = COALESCE(original_target_date, %s),
+                target_date = %s,
+                monthly_target = %s,
+                emi_vs_cash = %s::jsonb,
+                sacrifice_plan = %s::jsonb
+            WHERE id = %s AND user_id = %s
+            RETURNING id, item_name, target_amount, saved_amount, target_date, monthly_target,
+                      category, priority, status, best_buy_month, emi_vs_cash, sacrifice_plan;
+            """,
+            (old_td, new_td, monthly_target, emi_vs, sacrifice, goal_id, user_id),
+        )
+        row2 = cur.fetchone()
+    except Exception as exc:
+        err = str(exc).lower()
+        if "original_target_date" not in err and "undefinedcolumn" not in err.replace(" ", ""):
+            cur.close()
+            raise HTTPException(500, f"postpone failed: {exc}") from exc
+        conn.rollback()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE purchase_goals
+            SET target_date = %s, monthly_target = %s,
+                emi_vs_cash = %s::jsonb, sacrifice_plan = %s::jsonb
+            WHERE id = %s AND user_id = %s
+            RETURNING id, item_name, target_amount, saved_amount, target_date, monthly_target,
+                      category, priority, status, best_buy_month, emi_vs_cash, sacrifice_plan;
+            """,
+            (new_td, monthly_target, emi_vs, sacrifice, goal_id, user_id),
+        )
+        row2 = cur.fetchone()
+
+    if not row2:
+        cur.close()
+        raise HTTPException(500, "postpone update returned no row")
+
+    try:
+        cur.execute("SAVEPOINT postpone_finlog2")
+        cur.execute(
+            """
+            INSERT INTO financial_advice (
+                user_id, advice_type, title, description, action_items, severity, user_action, executed_at
+            ) VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s, NOW());
+            """,
+            (
+                user_id,
+                "postpone_accepted",
+                "Purchase goal postponed (months)",
+                f"Postponed by {body.postpone_months} months from EMI Tracker.",
+                json.dumps(
+                    {
+                        "goal_id": goal_id,
+                        "postpone_months": body.postpone_months,
+                        "new_target_date": new_td.isoformat(),
+                        "prior_target_date": old_td.isoformat(),
+                    }
+                ),
+                "info",
+                "accepted",
+            ),
+        )
+    except Exception:
+        try:
+            cur.execute("ROLLBACK TO SAVEPOINT postpone_finlog2")
+        except Exception:
+            conn.rollback()
+            cur.close()
+            cur = conn.cursor()
+
+    # Fire cascade recalculation
+    try:
+        from services.financial_engine import recalculate_financial_state as _rfs
+        _rfs(conn, user_id, 'purchase_goal_postponed', goal_id, 'Goal postponed.')
+    except Exception:
+        pass
+    cur.close()
+    enriched = _enrich_goal(conn, user_id, row2)
+    return {
+        "success": True,
+        "message": f"Goal “{enriched.get('item_name', '')}” moved by {body.postpone_months} month(s) to {new_td.isoformat()}.",
+        "goal": enriched,
+        "previous_target_date": old_td.isoformat(),
+    }
+
+
+@router.post("/{user_id}/goals/{goal_id}/postpone")
+def postpone_purchase_goal(user_id: int, goal_id: int, body: PostponeGoalBody, conn=Depends(get_db)):
+    """Move a goal's target date (EMI Tracker festival shift or generic date) and refresh monthly savings pace."""
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM users WHERE id = %s;", (user_id,))
+    if not cur.fetchone():
+        cur.close()
+        raise HTTPException(404, "User not found")
+    try:
+        new_td = datetime.strptime(body.new_target_date[:10], "%Y-%m-%d").date()
+    except ValueError:
+        cur.close()
+        raise HTTPException(400, "new_target_date must be YYYY-MM-DD")
+    if new_td <= date.today():
+        cur.close()
+        raise HTTPException(400, "new_target_date must be in the future")
+
+    cur.execute(
+        """
+        SELECT id, item_name, target_amount, saved_amount, target_date, monthly_target,
+               category, priority, status, best_buy_month, emi_vs_cash, sacrifice_plan
+        FROM purchase_goals
+        WHERE id = %s AND user_id = %s AND UPPER(COALESCE(status, '')) <> 'CANCELLED';
+        """,
+        (goal_id, user_id),
+    )
+    row = cur.fetchone()
+    if not row:
+        cur.close()
+        raise HTTPException(404, "Goal not found")
+
+    old_td = row[4] if isinstance(row[4], date) else datetime.strptime(str(row[4])[:10], "%Y-%m-%d").date()
+    if new_td <= old_td:
+        cur.close()
+        raise HTTPException(400, "new_target_date must be after the goal's current target_date")
+
+    target_amount_f = float(row[2] or 0)
+    saved_f = float(row[3] or 0)
+    remaining = max(0.0, target_amount_f - saved_f)
+    today = date.today()
+    months_rem = max(1, _months_between(today, new_td))
+    mt = round(remaining / months_rem, 2)
+
+    emi_vs = json.dumps(_emi_cash_payload(target_amount_f))
+    gap = max(0.0, mt - _avg_monthly_saved(conn, user_id))
+    sacrifice = json.dumps(_build_sacrifice_plan(conn, user_id, gap, mt))
+
+    fk = (body.festival_key or "").strip()[:50] or None
+    dl = (body.display_timeline_label or "").strip()[:80] or None
+
+    row2 = None
+    try:
+        cur.execute(
+            """
+            UPDATE purchase_goals
+            SET original_target_date = COALESCE(original_target_date, %s),
+                target_date = %s,
+                monthly_target = %s,
+                emi_vs_cash = %s::jsonb,
+                sacrifice_plan = %s::jsonb,
+                linked_festival_key = %s,
+                display_timeline_label = %s
+            WHERE id = %s AND user_id = %s
+            RETURNING id, item_name, target_amount, saved_amount, target_date, monthly_target,
+                      category, priority, status, best_buy_month, emi_vs_cash, sacrifice_plan;
+            """,
+            (old_td, new_td, mt, emi_vs, sacrifice, fk, dl, goal_id, user_id),
+        )
+        row2 = cur.fetchone()
+    except Exception as exc:
+        err = str(exc).lower()
+        if "linked_festival" not in err and "display_timeline" not in err and "undefinedcolumn" not in err.replace(" ", ""):
+            cur.close()
+            raise HTTPException(500, f"postpone update failed: {exc}") from exc
+        conn.rollback()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE purchase_goals
+            SET original_target_date = COALESCE(original_target_date, %s),
+                target_date = %s,
+                monthly_target = %s,
+                emi_vs_cash = %s::jsonb,
+                sacrifice_plan = %s::jsonb
+            WHERE id = %s AND user_id = %s
+            RETURNING id, item_name, target_amount, saved_amount, target_date, monthly_target,
+                      category, priority, status, best_buy_month, emi_vs_cash, sacrifice_plan;
+            """,
+            (old_td, new_td, mt, emi_vs, sacrifice, goal_id, user_id),
+        )
+        row2 = cur.fetchone()
+    if not row2:
+        cur.close()
+        raise HTTPException(500, "postpone update returned no row")
+
+    try:
+        cur.execute("SAVEPOINT postpone_finlog")
+        cur.execute(
+            """
+            INSERT INTO financial_advice (
+                user_id, advice_type, title, description, action_items, severity, user_action, executed_at
+            ) VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s, NOW());
+            """,
+            (
+                user_id,
+                "postpone_accepted",
+                "Purchase goal postponed from EMI Tracker",
+                body.reason or "User postponed goal to improve EMI affordability.",
+                json.dumps(
+                    {
+                        "goal_id": goal_id,
+                        "new_target_date": new_td.isoformat(),
+                        "prior_target_date": old_td.isoformat(),
+                        "festival_key": fk,
+                        "display_timeline_label": dl,
+                    }
+                ),
+                "info",
+                "accepted",
+            ),
+        )
+    except Exception:
+        try:
+            cur.execute("ROLLBACK TO SAVEPOINT postpone_finlog")
+        except Exception:
+            conn.rollback()
+            cur.close()
+            cur = conn.cursor()
+
+    cur.close()
+    enriched = _enrich_goal(conn, user_id, row2)
+    return {
+        "success": True,
+        "message": f"Goal “{enriched.get('item_name', '')}” target moved to {new_td.isoformat()}.",
+        "goal": enriched,
+        "previous_target_date": old_td.isoformat(),
+    }
 
 
 @router.delete("/{user_id}/{goal_id}")

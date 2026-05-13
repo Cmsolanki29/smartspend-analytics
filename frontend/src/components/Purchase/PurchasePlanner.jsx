@@ -9,6 +9,11 @@ import { useToast } from "../common/Toast";
 import { EmptyState } from "../common/EmptyState";
 import { ErrorCard } from "../common/ErrorCard";
 import { SkeletonCard } from "../common/SkeletonCard";
+import { PageHeader } from "../Dashboard/shared/PageHeader";
+import { HeroKpiTile } from "../Dashboard/shared/HeroKpiTile";
+import { inr } from "../../lib/format";
+
+const ACCENT = "#38BDF8";
 
 const fmt = (n) =>
   new Intl.NumberFormat("en-IN", {
@@ -52,6 +57,18 @@ const PurchasePlanner = ({ userId }) => {
   useEffect(() => {
     load();
   }, [load]);
+
+  useEffect(() => {
+    const onSync = (e) => {
+      if (e?.detail?.userId === userId) load();
+    };
+    window.addEventListener("smartspend-financial-sync", onSync);
+    window.addEventListener("smartspend:purchase-goals-changed", onSync);
+    return () => {
+      window.removeEventListener("smartspend-financial-sync", onSync);
+      window.removeEventListener("smartspend:purchase-goals-changed", onSync);
+    };
+  }, [userId, load]);
 
   const goals = (data?.goals || []).slice().sort((a, b) => priorityRank(a.priority) - priorityRank(b.priority));
 
@@ -120,24 +137,33 @@ const PurchasePlanner = ({ userId }) => {
     }
   };
 
+  const onTrackCount  = goals.filter((g) => Number(g.progress_pct || 0) >= (Number(g.months_to_deadline || 1) > 0 ? 50 : 0)).length;
+  const totalCommitted = goals.reduce((s, g) => s + Number(g.target_amount || 0), 0);
+
   return (
     <div className="purchase-page fade-in">
+      <PageHeader
+        eyebrow="PURCHASE PLANNER"
+        title="Goal-first Spending"
+        subtitle="Every purchase decision checked against your goals. Know before you buy, save before you splurge."
+        accentHex={ACCENT}
+        rightSlot={
+          <HeroKpiTile
+            label="Goals on track"
+            value={loading ? "—" : String(onTrackCount)}
+            caption={`Total committed ${inr(totalCommitted)} across ${goals.length} goal${goals.length !== 1 ? "s" : ""}`}
+            accentHex={ACCENT}
+            loading={loading}
+          />
+        }
+      />
+
       {celebrate && (
         <div className="purchase-confetti-wrap" aria-live="polite">
           <div className="purchase-confetti" />
-          <p className="purchase-celebrate-msg">🎉 {celebrate.msg}</p>
+          <p className="purchase-celebrate-msg">Goal milestone reached!</p>
         </div>
       )}
-
-      <header className="purchase-hero glass-card">
-        <div>
-          <h2 className="purchase-title">🛵 Big Purchase Planner</h2>
-          <p className="purchase-sub">Stop dreaming, start planning — achieve your goals!</p>
-        </div>
-        <button type="button" className="btn-primary" onClick={() => setModal(true)}>
-          + Add goal
-        </button>
-      </header>
 
       {loading && (
         <div className="glass-card feature-card" style={{ marginBottom: 14 }}>

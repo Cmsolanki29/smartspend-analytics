@@ -1,8 +1,9 @@
-"""AI Insights Engine — Phase 4 (OpenAI GPT-4o-mini)."""
+"""AI Insights Engine — Phase 4 (OpenAI GPT-4o-mini + Rule-based Fallback)."""
 
 from __future__ import annotations
 
 import calendar
+import re
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -229,9 +230,15 @@ def _health_details_for_narrative(hs: Any) -> dict[str, Any]:
 
 
 @router.get("/{user_id}/quick-summary")
-def quick_summary(user_id: int, conn=Depends(get_db)):
+def quick_summary(
+    user_id: int,
+    month: int | None = Query(None, ge=1, le=12),
+    year: int | None = Query(None, ge=2000, le=2100),
+    conn=Depends(get_db),
+):
     today = date.today()
-    m, y = today.month, today.year
+    m = month if month is not None else today.month
+    y = year if year is not None else today.year
     cur = conn.cursor()
     try:
         cur.execute(
@@ -282,9 +289,13 @@ def quick_summary(user_id: int, conn=Depends(get_db)):
         top_spend_category = str(tc[0]) if tc else "N/A"
 
         dim = calendar.monthrange(y, m)[1]
-        days_left_in_month = max(0, dim - today.day)
-        day_idx = max(1, today.day)
-        projected_month_end_savings = round(this_month_saved * (dim / day_idx), 2)
+        if m == today.month and y == today.year:
+            days_left_in_month = max(0, dim - today.day)
+            day_idx = max(1, today.day)
+            projected_month_end_savings = round(this_month_saved * (dim / day_idx), 2)
+        else:
+            days_left_in_month = 0
+            projected_month_end_savings = round(this_month_saved, 2)
 
         cur.execute(
             """
@@ -420,6 +431,201 @@ def anomaly_explanation(user_id: int, transaction_id: int, conn=Depends(get_db))
         cur.close()
 
 
+def _rule_based_simulate(user_data: dict[str, Any], conn, user_id: int, scenario: str) -> dict[str, Any]:
+    """
+    Compute exact financial impact from real DB data without any LLM.
+    Parses common Indian fintech scenario patterns and returns precise numbers.
+    """
+    income = float(user_data.get("monthly_income") or 0)
+    expense = float(user_data.get("total_expense") or 0)
+    saved = float(user_data.get("total_saved") or 0)
+    savings_rate = float(user_data.get("savings_rate") or 0)
+    health = int(user_data.get("health_score") or 0)
+    cats = user_data.get("category_breakdown") or []
+
+    s = scenario.lower().strip()
+
+    income_delta = 0.0
+    expense_delta = 0.0
+    label = scenario
+    advice_lines: list[str] = []
+    alternatives: list[str] = []
+
+    # --- Parse: "salary cut X%" / "income drop X%"
+    m = re.search(r"salary.{0,12}cut\s+(\d+)\s*%|income.{0,6}drop\s+(\d+)\s*%|salary.{0,6}(\d+)\s*%", s)
+    if m:
+        pct = float(next(x for x in m.groups() if x))
+        income_delta = -income * pct / 100
+        label = f"Salary cut {pct:.0f}%"
+        advice_lines.append(
+            f"A {pct:.0f}% salary cut reduces your income by ₹{abs(income_delta):,.0f}/month, "
+            f"dropping monthly savings from ₹{saved:,.0f} to ₹{max(saved + income_delta, 0):,.0f}."
+        )
+        if saved + income_delta < 0:
+            advice_lines.append("This puts you in deficit — consider pausing discretionary spend immediately.")
+        alternatives = [
+            f"Negotiate a {pct/2:.0f}% temporary cut instead of {pct:.0f}%",
+            "Cut ₹" + f"{abs(income_delta * 0.5):,.0f} from non-essential categories to partially absorb the impact",
+        ]
+
+    # --- Parse: "food/shopping/category +X%" / "spend X% more on Y"
+    m2 = re.search(r"(food|shopping|dining|travel|entertainment|grocery|groceries|rent|emi)\s*(spending)?\s*[+](\d+)\s*%", s)
+    if not income_delta and not expense_delta and m2:
+        cat_name = m2.group(1).title()
+        pct = float(m2.group(3))
+        cat_amt = next((float(c["amount"]) for c in cats if cat_name.lower() in c.get("category", "").lower()), expense * 0.15)
+        expense_delta = cat_amt * pct / 100
+        label = f"{cat_name} spending +{pct:.0f}%"
+        advice_lines.append(
+            f"Increasing {cat_name} spend by {pct:.0f}% adds ₹{expense_delta:,.0f}/month "
+            f"(based on your actual ₹{cat_amt:,.0f} {cat_name} spend)."
+        )
+        advice_lines.append(f"This cuts your savings by ₹{expense_delta:,.0f} to ₹{max(saved - expense_delta, 0):,.0f}.")
+        alternatives = [
+            f"Cap {cat_name} increase at +{pct/2:.0f}% (saves ₹{expense_delta/2:,.0f}/month)",
+            f"Offset with ₹{expense_delta:,.0f} cut from your next-highest spending category",
+        ]
+
+    # --- Parse: "start SIP X" / "invest X"
+    m3 = re.search(r"(?:start|begin|add)\s+(?:rs\.?\s*)?(\d[\d,]*)\s*(?:sip|investment|invest|mutual fund)", s)
+    if not income_delta and not expense_delta and m3:
+        sip_amt = float(m3.group(1).replace(",", ""))
+        expense_delta = sip_amt
+        label = f"Start ₹{sip_amt:,.0f} SIP"
+        advice_lines.append(
+            f"A ₹{sip_amt:,.0f}/month SIP reduces liquid savings by ₹{sip_amt:,.0f} but builds long-term wealth."
+        )
+        annual = sip_amt * 12 * 1.12
+        advice_lines.append(f"At 12% annual return, ₹{sip_amt:,.0f}/month SIP grows to ~₹{annual:,.0f} in 1 year.")
+        if saved - sip_amt < 2000:
+            advice_lines.append(
+                f"Warning: This leaves only ₹{max(saved - sip_amt, 0):,.0f} liquid. "
+                "Keep at least 2 months expenses as emergency buffer."
+            )
+        alternatives = [
+            f"Start with ₹{sip_amt/2:,.0f} SIP first, scale after building ₹{expense * 3:,.0f} emergency fund",
+            "Consider ELSS funds — same SIP but with 80C tax deduction benefit",
+        ]
+
+    # --- Parse: "add rent X" / "new rent X"
+    m4 = re.search(r"(?:add|new|pay|paying)\s+(?:rs\.?\s*)?(\d[\d,]*)\s*(?:rent|house\s*rent)", s)
+    if not income_delta and not expense_delta and m4:
+        rent = float(m4.group(1).replace(",", ""))
+        expense_delta = rent
+        label = f"Add ₹{rent:,.0f} rent"
+        advice_lines.append(
+            f"Adding ₹{rent:,.0f} rent reduces monthly savings to ₹{max(saved - rent, 0):,.0f}."
+        )
+        rent_to_income = rent / income * 100 if income > 0 else 0
+        if rent_to_income > 30:
+            advice_lines.append(f"This rent is {rent_to_income:.0f}% of income — above the recommended 30% threshold. Consider co-living.")
+        else:
+            advice_lines.append(f"This rent is {rent_to_income:.0f}% of income — within safe limits.")
+        alternatives = [
+            f"Look for accommodation at ₹{rent * 0.75:,.0f} (25% cheaper) to save ₹{rent * 0.25:,.0f}/month",
+            "Negotiate rent-free first month to reduce immediate impact",
+        ]
+
+    # --- Fetch EMI and goal commitments from DB for richer output
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT COALESCE(SUM(emi_amount),0)::float FROM emi_records WHERE user_id=%s AND is_active=TRUE",
+            (user_id,)
+        )
+        total_emi = float(cur.fetchone()[0] or 0)
+
+        cur.execute(
+            "SELECT COUNT(*) FROM purchase_goals WHERE user_id=%s AND status='active'",
+            (user_id,)
+        )
+        active_goals = int(cur.fetchone()[0] or 0)
+
+        cur.execute(
+            "SELECT COUNT(*) FROM festival_budgets WHERE user_id=%s AND festival_date > CURRENT_DATE",
+            (user_id,)
+        )
+        upcoming_festivals = int(cur.fetchone()[0] or 0)
+    except Exception:
+        total_emi = 0
+        active_goals = 0
+        upcoming_festivals = 0
+    finally:
+        cur.close()
+
+    # --- Compute projected state
+    proj_income = income + income_delta
+    proj_expense = expense + expense_delta
+    proj_saved = proj_income - proj_expense
+    proj_savings_rate = round(proj_saved / proj_income * 100, 1) if proj_income > 0 else 0.0
+
+    savings_change = proj_saved - saved
+    savings_change_pct = round(savings_change / saved * 100, 1) if saved != 0 else 0.0
+    annual_impact = round(savings_change * 12, 0)
+
+    health_delta = 0
+    if proj_savings_rate >= 20:
+        health_delta = 5
+    elif proj_savings_rate <= 0:
+        health_delta = -25
+    elif proj_savings_rate < 5:
+        health_delta = -15
+    elif proj_savings_rate < 10:
+        health_delta = -8
+    else:
+        health_delta = -3
+    proj_health = max(0, min(100, health + health_delta))
+
+    if proj_saved < 0:
+        verdict = "CRITICAL"
+    elif proj_savings_rate < 5 or abs(savings_change) > income * 0.2:
+        verdict = "RISKY"
+    else:
+        verdict = "MANAGEABLE"
+
+    if not advice_lines:
+        advice_lines.append(
+            f"This scenario changes your monthly savings from ₹{saved:,.0f} to ₹{proj_saved:,.0f}."
+        )
+
+    # Context: existing EMI and goal burden
+    if total_emi > 0:
+        advice_lines.append(
+            f"Note: You already carry ₹{total_emi:,.0f}/month in active EMIs"
+            + (f" and have {active_goals} active purchase goal(s)" if active_goals else "")
+            + " — factor these into any new commitment."
+        )
+    if upcoming_festivals > 0:
+        advice_lines.append(f"You have {upcoming_festivals} upcoming festival(s) to budget for as well.")
+
+    return {
+        "scenario_title": label,
+        "current_state": {
+            "monthly_savings": round(saved, 0),
+            "health_score": health,
+            "savings_rate": round(savings_rate, 1),
+        },
+        "projected_state": {
+            "monthly_savings": round(proj_saved, 0),
+            "health_score": proj_health,
+            "savings_rate": proj_savings_rate,
+        },
+        "impact": {
+            "savings_change": round(savings_change, 0),
+            "savings_change_pct": savings_change_pct,
+            "health_score_change": health_delta,
+            "annual_impact": annual_impact,
+            "emi_burden": round(total_emi, 0),
+            "active_goals": active_goals,
+            "upcoming_festivals": upcoming_festivals,
+        },
+        "verdict": verdict,
+        "advice": " ".join(advice_lines),
+        "alternatives": alternatives,
+        "computed_from": "real_transactions",
+    }
+
+
 class SimulationRequest(BaseModel):
     scenario: str = Field(..., min_length=3, max_length=800)
     month: int = Field(default_factory=lambda: date.today().month, ge=1, le=12)
@@ -430,11 +636,18 @@ class SimulationRequest(BaseModel):
 def simulate(user_id: int, body: SimulationRequest, conn=Depends(get_db)):
     try:
         user_data = build_user_data(conn, user_id, body.month, body.year)
-        return simulate_financial_scenario(user_data, body.scenario)
+
+        # Try LLM first; fall back to deterministic rule-based engine
+        ai_result = simulate_financial_scenario(user_data, body.scenario)
+        if ai_result.get("verdict") not in (None, "", "UNKNOWN"):
+            ai_result["computed_from"] = "ai"
+            return ai_result
+
+        return _rule_based_simulate(user_data, conn, user_id, body.scenario)
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"AI service error: {e}") from e
+        raise HTTPException(status_code=500, detail=f"Simulation error: {e}") from e
 
 
 @router.get("/{user_id}")

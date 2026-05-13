@@ -545,27 +545,35 @@ def list_alerts(user_id: int, severity: str | None = None, conn=Depends(get_db))
     valid_severities = {"LOW", "MEDIUM", "HIGH", "CRITICAL"}
     sev_filter = severity.upper() if severity and severity.upper() in valid_severities else None
 
+    # fraud_alerts has no DB column "severity" — derive from risk_score (schema: fraud_schema.sql).
+    _sev = """CASE
+        WHEN COALESCE(risk_score, 0) >= 85 THEN 'CRITICAL'
+        WHEN COALESCE(risk_score, 0) >= 65 THEN 'HIGH'
+        WHEN COALESCE(risk_score, 0) >= 35 THEN 'MEDIUM'
+        ELSE 'LOW'
+    END"""
+
     if sev_filter:
         cur.execute(
-            """
+            f"""
             SELECT id, pattern_matched, risk_score, amount_at_risk, warning_message,
                    hinglish_explanation, user_action, money_saved, created_at,
-                   COALESCE(severity, 'MEDIUM') AS severity
+                   ({_sev}) AS severity
             FROM fraud_alerts
-            WHERE user_id = %s AND UPPER(COALESCE(severity, 'MEDIUM')) = %s
-            ORDER BY risk_score DESC, created_at DESC;
+            WHERE user_id = %s AND ({_sev}) = %s
+            ORDER BY risk_score DESC NULLS LAST, created_at DESC;
             """,
             (user_id, sev_filter),
         )
     else:
         cur.execute(
-            """
+            f"""
             SELECT id, pattern_matched, risk_score, amount_at_risk, warning_message,
                    hinglish_explanation, user_action, money_saved, created_at,
-                   COALESCE(severity, 'MEDIUM') AS severity
+                   ({_sev}) AS severity
             FROM fraud_alerts
             WHERE user_id = %s
-            ORDER BY risk_score DESC, created_at DESC;
+            ORDER BY risk_score DESC NULLS LAST, created_at DESC;
             """,
             (user_id,),
         )

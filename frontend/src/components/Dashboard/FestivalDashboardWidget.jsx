@@ -38,7 +38,7 @@ const FestivalDashboardWidget = ({ userId, onPlanNow }) => {
     return (
       <section className="glass-card festival-dash-widget hover-glow feature-card">
         <div className="panel-head">
-          <h3>🪔 Next festival</h3>
+          <h3>Next festival</h3>
         </div>
         <p className="muted small" style={{ marginBottom: 10 }}>
           Loading festival snapshot…
@@ -52,7 +52,7 @@ const FestivalDashboardWidget = ({ userId, onPlanNow }) => {
     return (
       <section className="glass-card festival-dash-widget hover-glow feature-card">
         <div className="panel-head">
-          <h3>🪔 Next festival</h3>
+          <h3>Next festival</h3>
         </div>
         <p className="muted small">No upcoming festivals in window — open planner for full calendar.</p>
         <button type="button" className="btn-outline fest-dash-btn" onClick={onPlanNow}>
@@ -65,11 +65,11 @@ const FestivalDashboardWidget = ({ userId, onPlanNow }) => {
   return (
     <section className="glass-card festival-dash-widget hover-glow feature-card">
       <div className="panel-head">
-        <h3>🪔 Next festival</h3>
+        <h3>Next festival</h3>
       </div>
       <p>
         <strong>{n.name}</strong> in {n.days_remaining} days
-        {n.urgency === "CRITICAL" || n.urgency === "URGENT" ? " ⚠️" : ""}
+        {n.urgency === "CRITICAL" || n.urgency === "URGENT" ? " · Urgent" : ""}
       </p>
       <p className="muted small">
         Last year: {fmt(full?.last_year_spent)} · Saved: {fmt(full?.saved_so_far)}

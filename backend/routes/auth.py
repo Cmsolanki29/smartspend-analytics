@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+# Demo / judge emails: see models.auth_schemas.DemoFriendlyEmail (allows @demo.smartspend.local).
+
 import logging
 import os
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 from psycopg2.extensions import connection as PgConnection
 
 from db import get_db
@@ -44,8 +46,55 @@ def _dev_auth_detail(exc: Exception, fallback: str) -> str:
     return f"{fallback}: {msg[:400]}"
 
 
+def _seed_new_user_transactions(user_id: int) -> None:
+    """
+    Heavy inserts (1000+ txns + demo workspace) run after the signup HTTP response.
+    Uses a dedicated connection so the client is not blocked by bulk inserts / ML DB load.
+    """
+    import random
+
+    from db import get_connection
+    from services.demo_workspace_seed import seed_demo_workspace
+
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        try:
+            use_corpus = os.getenv("SMARTSPEND_SEED_CORPUS", "").lower() in ("1", "true", "yes")
+            if use_corpus:
+                from services.indian_fintech_seed.assign import assign_corpus_to_user
+
+                n = assign_corpus_to_user(cur, user_id, count=random.randint(1000, 1500))
+                if n < 500:
+                    from services.new_user_transaction_seed import ensure_user_has_transactions
+
+                    ensure_user_has_transactions(cur, user_id, min_count=1100)
+            else:
+                from services.new_user_transaction_seed import ensure_user_has_transactions
+
+                ensure_user_has_transactions(cur, user_id, min_count=1100)
+            seed_demo_workspace(cur, user_id)
+            conn.commit()
+        except Exception as seed_exc:  # noqa: BLE001
+            conn.rollback()
+            logger.exception(
+                "Background demo seed failed for new user id=%s (account still valid): %s",
+                user_id,
+                seed_exc,
+            )
+        finally:
+            cur.close()
+    finally:
+        conn.close()
+
+
 @router.post("/signup", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
-def signup(user: UserSignUp, request: Request, conn: PgConnection = Depends(get_db)) -> TokenResponse:
+def signup(
+    user: UserSignUp,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    conn: PgConnection = Depends(get_db),
+) -> TokenResponse:
     cur = conn.cursor()
     try:
         cur.execute("SELECT id FROM users WHERE lower(email) = lower(%s)", (str(user.email),))
@@ -78,7 +127,8 @@ def signup(user: UserSignUp, request: Request, conn: PgConnection = Depends(get_
             """,
             (user_id, access, refresh, ACCESS_TOKEN_EXPIRE_MINUTES, client_host, ua),
         )
-        logger.info("New user registered id=%s email=%s", user_id, user.email)
+        background_tasks.add_task(_seed_new_user_transactions, user_id)
+        logger.info("New user registered id=%s email=%s (demo seed scheduled)", user_id, user.email)
         return TokenResponse(
             access_token=access,
             refresh_token=refresh,

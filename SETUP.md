@@ -56,11 +56,12 @@ ADMIN_TOKEN=dev-admin-secret
 PHASE_9_AGENT_ENABLED=true
 ```
 
-Also open `frontend/.env.local` and confirm it has:
+Also open `frontend/.env.local` — **you can leave `REACT_APP_API_URL` unset** in development. The app calls same-origin `/api`, and Create React App proxies that to `http://127.0.0.1:8001` (see `frontend/package.json` → `"proxy"`). That avoids CORS and avoids a wrong port (e.g. 8012) when the backend is on **8001**.
+
+Optional (production builds only): set `REACT_APP_API_URL` at build time if the API is not co-hosted.
 
 ```env
-REACT_APP_API_URL=http://localhost:8001/api
-VITE_API_URL=http://localhost:8001/api
+# (optional in dev) REACT_APP_API_URL=https://your-api.example.com/api
 ```
 
 ---
@@ -132,22 +133,15 @@ npm install
 
 ## Step 7 — Start the Frontend
 
-From the project root:
+From the project root (recommended — **always port 3000**, frees the port, clears a bad `REACT_APP_API_URL` from your shell):
 
 ```powershell
 .\start-frontend.ps1
 ```
 
-Or directly:
+This starts **http://localhost:3000**. The app talks to the API via same-origin **`/api`**, which Create React App **proxies** to **http://127.0.0.1:8001** (see `frontend/package.json` → `"proxy"`). You do **not** need `REACT_APP_API_URL` in dev. The browser may open automatically; you should see the **SmartSpend intro animation**.
 
-```powershell
-cd frontend
-npm start
-```
-
-This starts the React app on **http://localhost:3000**
-
-The browser will open automatically. You should see the **SmartSpend intro animation**.
+If you insist on `cd frontend` + `npm start` by hand, keep **`PORT=3000`** in `frontend/.env.local` and never point `REACT_APP_API_URL` at a random localhost port.
 
 ---
 
@@ -193,9 +187,9 @@ Or use full path: `& "C:\Program Files\PostgreSQL\15\bin\psql.exe"`
 - Make sure PostgreSQL service is running (search "Services" in Windows → find PostgreSQL → Start)
 
 ### Frontend shows blank page or API errors
-- Make sure backend is running on port 8001 first
-- Check `frontend/.env.local` has `REACT_APP_API_URL=http://localhost:8001/api`
-- Open browser DevTools (F12) → Console tab → check for red errors
+- Make sure backend is running on port **8001** first (`.\start-backend.ps1`).
+- In **development**, do **not** set `REACT_APP_API_URL` to another localhost port unless the API really runs there; the UI uses `/api` → CRA **proxy** → `127.0.0.1:8001`.
+- Open browser DevTools (F12) → Console / Network → check for failed `/api/...` calls.
 
 ### Port 8001 already in use
 The `start-backend.ps1` script auto-kills any old process on port 8001. Just run it again.

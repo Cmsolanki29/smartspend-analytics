@@ -6,6 +6,11 @@ export type GlassCardProps = HTMLAttributes<HTMLDivElement> & {
   elevation?: "flat" | "raised";
   /** Inner padding scale. */
   padding?: "sm" | "md" | "lg";
+  /**
+   * "glass" — frosted intro-style (blur + translucent wash).
+   * "panel" — near-opaque surface for tables / long text (no backdrop-blur).
+   */
+  surface?: "glass" | "panel";
 };
 
 const padMap = {
@@ -16,12 +21,14 @@ const padMap = {
 
 /**
  * Glass token used across the intro flow.
- * `bg-white/5 backdrop-blur-2xl border border-white/10 rounded-2xl`
+ * `surface="glass"`: bg-white/5 backdrop-blur-2xl border border-white/10 rounded-2xl
+ * `surface="panel"`: opaque-ish dashboard panels (sharp text, no stacked blur).
  */
 export function GlassCard({
   children,
   elevation = "flat",
   padding = "md",
+  surface = "glass",
   className,
   ...rest
 }: GlassCardProps) {
@@ -30,13 +37,19 @@ export function GlassCard({
       ? "shadow-[0_18px_60px_rgba(124,58,237,0.28),0_0_0_1px_rgba(255,255,255,0.06)_inset,0_0_60px_rgba(34,211,238,0.10)]"
       : "shadow-ss-glass";
 
+  const surfaceClass =
+    surface === "panel"
+      ? "border-white/10 bg-[#0c0c18]/95"
+      : "border-white/10 bg-white/5 backdrop-blur-2xl";
+
   return (
     <div
       {...rest}
-      className={`relative overflow-hidden rounded-2xl border border-white/10 bg-white/5 backdrop-blur-2xl ${elevationClass} ${padMap[padding]} ${className ?? ""}`}
+      className={`relative overflow-hidden rounded-2xl ${surfaceClass} ${elevationClass} ${padMap[padding]} ${className ?? ""}`}
     >
-      {/* Inner highlight + soft brand wash */}
-      <div className="pointer-events-none absolute inset-0 rounded-2xl bg-gradient-to-br from-white/[0.06] via-transparent to-violet-500/[0.04]" />
+      {surface === "glass" ? (
+        <div className="pointer-events-none absolute inset-0 rounded-2xl bg-gradient-to-br from-white/[0.06] via-transparent to-violet-500/[0.04]" />
+      ) : null}
       <div className="relative">{children}</div>
     </div>
   );

@@ -1,129 +1,314 @@
-import React, { useEffect, useMemo, useState } from "react";
-import { Bell, ChevronDown, Search, Settings } from "lucide-react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { Calendar, ChevronDown, Landmark, Search, Settings, TrendingDown, TrendingUp, ArrowRightLeft } from "lucide-react";
+import { motion, AnimatePresence } from "framer-motion";
+import { GlassCard } from "../intro/GlassCard";
+import { ShieldMark } from "../intro/ShieldMark";
+import NotificationsBell from "./NotificationsBell";
 
-const selectClass =
-  "h-12 w-full appearance-none cursor-pointer rounded-xl border border-exiqo-purple/35 bg-exiqo-dark/50 " +
-  "pl-3.5 pr-9 text-sm font-medium text-white transition-all duration-200 " +
-  "hover:border-exiqo-purple/55 hover:bg-exiqo-dark/70 " +
-  "focus:border-exiqo-purple focus:outline-none focus:ring-2 focus:ring-exiqo-purple/40";
+/** Mock live feed — replace array with a real WebSocket / SSE feed when ready. */
+const LIVE_FEED = [
+  { id: 1, amount: "₹2,450",  merchant: "Amazon",        type: "debit"    },
+  { id: 2, amount: "₹18,000", merchant: "Salary credit",  type: "credit"   },
+  { id: 3, amount: "₹649",    merchant: "Netflix",        type: "debit"    },
+  { id: 4, amount: "₹5,200",  merchant: "PhonePe UPI",    type: "transfer" },
+  { id: 5, amount: "₹340",    merchant: "Swiggy",         type: "debit"    },
+  { id: 6, amount: "₹12,000", merchant: "HDFC EMI",       type: "debit"    },
+];
 
-const TopBar = ({
-  userName = "User",
-  month,
-  year,
-  onMonthChange,
-  onYearChange,
-}) => {
-  const [greeting, setGreeting] = useState("Good Morning");
+const TYPE_ICON = {
+  debit:    TrendingDown,
+  credit:   TrendingUp,
+  transfer: ArrowRightLeft,
+};
+
+const TYPE_COLOR = {
+  debit:    "text-rose-300/85",
+  credit:   "text-emerald-300/85",
+  transfer: "text-exiqo-glow/85",
+};
+
+function LiveTicker() {
+  const [idx, setIdx] = useState(0);
 
   useEffect(() => {
-    const hour = new Date().getHours();
-    if (hour < 12) setGreeting("Good Morning");
-    else if (hour < 17) setGreeting("Good Afternoon");
-    else setGreeting("Good Evening");
+    const id = window.setInterval(() => setIdx((i) => (i + 1) % LIVE_FEED.length), 4000);
+    return () => clearInterval(id);
   }, []);
+
+  const item = LIVE_FEED[idx];
+  const Icon = TYPE_ICON[item.type] ?? ArrowRightLeft;
+  const color = TYPE_COLOR[item.type] ?? "text-white/70";
+
+  return (
+    <div
+      className="hidden items-center gap-2 xl:flex h-8 shrink-0 overflow-hidden rounded-full border border-white/10 bg-white/[0.04] px-3"
+      aria-live="polite"
+      aria-label="Live transaction feed"
+    >
+      {/* Pulsing dot */}
+      <span className="relative flex h-2 w-2 shrink-0" aria-hidden>
+        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-60" />
+        <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-400" />
+      </span>
+      <span className="text-[10px] font-semibold uppercase tracking-[0.16em] text-white/40">Live</span>
+      <span className="h-3 w-px bg-white/10" aria-hidden />
+
+      {/* Animated transaction */}
+      <AnimatePresence mode="wait">
+        <motion.span
+          key={item.id}
+          initial={{ opacity: 0, y: 5 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -5 }}
+          transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+          className="flex items-center gap-1.5"
+        >
+          <Icon className={`h-3 w-3 shrink-0 ${color}`} aria-hidden />
+          <span className={`text-[11px] font-semibold tabular-nums ${color}`}>{item.amount}</span>
+          <span className="text-[11px] text-white/45">{item.merchant}</span>
+        </motion.span>
+      </AnimatePresence>
+    </div>
+  );
+}
+
+const MONTH_LABELS = [
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec",
+];
+
+/**
+ * Stub: opens the global Cmd+K command palette. Wire to a real palette later;
+ * the TopBar visual must read as a single command surface in the meantime.
+ */
+const openCommandPalette = () => {
+  // TODO: replace with real palette modal (search transactions, alerts, insights, navigation).
+  // eslint-disable-next-line no-console
+  console.log("[topbar] open command palette");
+};
+
+const TopBar = ({ userName = "User", userId, month, year, onMonthChange, onYearChange }) => {
+  const [periodOpen, setPeriodOpen] = useState(false);
+  const periodRef = useRef(null);
 
   const yearOptions = useMemo(() => {
     const y = new Date().getFullYear();
-    return [y - 2, y - 1, y, y + 1];
+    return [y - 2, y - 1, y, y + 1, y + 2];
+  }, []);
+
+  useEffect(() => {
+    const onClick = (e) => {
+      if (periodRef.current && !periodRef.current.contains(e.target)) setPeriodOpen(false);
+    };
+    const onKey = (e) => {
+      if (e.key === "Escape") setPeriodOpen(false);
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        openCommandPalette();
+      }
+    };
+    document.addEventListener("mousedown", onClick);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onClick);
+      window.removeEventListener("keydown", onKey);
+    };
   }, []);
 
   const displayName = userName?.trim() || "User";
   const initial = displayName.charAt(0).toUpperCase() || "U";
+  const monthLabel = MONTH_LABELS[(Number(month) || 1) - 1] || MONTH_LABELS[0];
+  const periodLabel = `${monthLabel} ${year}`;
 
   return (
-    <header className="sticky top-0 z-40 border-b border-exiqo-purple/15 bg-exiqo-navy/95 backdrop-blur-xl">
-      <div className="mx-auto flex h-[4.75rem] max-w-[1920px] items-center gap-4 px-4 sm:gap-5 sm:px-6 lg:px-8">
-        {/* Left — tighter copy, no cramped duplicate line */}
-        <div className="min-w-0 shrink-0 lg:max-w-[min(18rem,28vw)]">
-          <h1 className="truncate text-lg font-semibold leading-snug tracking-tight text-white sm:text-xl">
-            <span className="bg-gradient-to-r from-white via-exiqo-glow to-exiqo-pink bg-clip-text text-transparent">
-              {greeting}, {displayName}
+    <header className="sticky top-0 z-40 h-16 w-full border-b border-white/5 bg-ss-bg-deep/95">
+      <div className="mx-auto flex h-full max-w-screen-2xl items-center justify-between gap-4 px-4 lg:px-6">
+        {/* LEFT — search (with mobile-only brand fallback when sidebar is hidden) */}
+        <div className="flex min-w-0 flex-1 items-center gap-3">
+          <div className="flex shrink-0 items-center gap-2.5 md:hidden">
+            <ShieldMark size={36} stage="complete" />
+            <span className="hidden font-heading text-[17px] font-semibold tracking-tight text-white sm:inline">
+              SmartSpend
             </span>
-          </h1>
-          <p className="mt-0.5 truncate text-[11px] font-medium text-exiqo-glow/45 sm:text-xs">
-            Spend intelligence overview
-          </p>
-        </div>
-
-        {/* Center: search — larger, no shortcut badge */}
-        <div className="hidden min-w-0 flex-1 items-center justify-center md:flex">
-          <div className="relative w-full max-w-2xl">
-            <label htmlFor="topbar-search" className="sr-only">
-              Search transactions and merchants
-            </label>
-            <div className="pointer-events-none absolute left-4 top-1/2 z-10 -translate-y-1/2">
-              <Search className="h-5 w-5 text-exiqo-purple" strokeWidth={2.5} aria-hidden />
-            </div>
-            <input
-              id="topbar-search"
-              type="search"
-              name="q"
-              placeholder="Search transactions, merchants..."
-              autoComplete="off"
-              className="h-12 w-full rounded-xl border-2 border-exiqo-purple/40 bg-exiqo-dark/60 py-0 pl-12 pr-4 text-base font-medium text-white placeholder:text-exiqo-glow/40 transition-all duration-200 hover:border-exiqo-purple/60 hover:bg-exiqo-dark/80 focus:border-exiqo-purple focus:outline-none focus:ring-2 focus:ring-exiqo-purple/50"
-            />
-          </div>
-        </div>
-
-        {/* Right — same height (h-12) as search */}
-        <div className="flex shrink-0 items-center gap-2 sm:gap-2.5">
-          <div className="relative w-[6.5rem] sm:w-[7.25rem]">
-            <select
-              value={month}
-              onChange={(e) => onMonthChange(Number(e.target.value))}
-              className={selectClass}
-            >
-              {Array.from({ length: 12 }).map((_, idx) => (
-                <option key={idx + 1} value={idx + 1} className="bg-exiqo-navy text-white">
-                  {new Date(year, idx, 1).toLocaleDateString("en-IN", { month: "short" })}
-                </option>
-              ))}
-            </select>
-            <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-exiqo-purple/90" />
           </div>
 
-          <div className="relative min-w-[100px]">
-            <select
-              value={year}
-              onChange={(e) => onYearChange(Number(e.target.value))}
-              className="h-12 min-w-[100px] w-full cursor-pointer appearance-none rounded-xl border-2 border-exiqo-purple/40 bg-exiqo-dark/60 pl-4 pr-10 text-base font-semibold text-white transition-all duration-200 hover:border-exiqo-purple/60 hover:bg-exiqo-dark/80 focus:border-exiqo-purple focus:outline-none focus:ring-2 focus:ring-exiqo-purple/50"
-            >
-              {yearOptions.map((y) => (
-                <option key={y} value={y} className="bg-exiqo-navy text-white">
-                  {y}
-                </option>
-              ))}
-            </select>
-            <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-exiqo-purple" />
-          </div>
-
+          {/* Desktop search pill (lg+) */}
           <button
             type="button"
-            className="group relative flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border border-exiqo-purple/35 bg-exiqo-dark/50 transition hover:border-exiqo-purple/55 hover:bg-exiqo-purple/15"
+            onClick={openCommandPalette}
+            aria-label="Open search (Cmd+K)"
+            className="group relative hidden h-10 w-full max-w-[420px] items-center gap-2.5 rounded-full border border-white/10 bg-white/[0.04] px-3.5 transition-all duration-300 ease-brand hover:border-white/20 hover:bg-white/[0.06] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/50 lg:inline-flex"
           >
-            <Bell className="h-[18px] w-[18px] text-exiqo-glow transition-colors group-hover:text-exiqo-pink" strokeWidth={2} />
-            <span className="absolute right-2 top-2 h-1.5 w-1.5 rounded-full bg-exiqo-pink ring-2 ring-exiqo-navy" />
+            <Search className="h-4 w-4 text-white/55 transition group-hover:text-white/80" aria-hidden />
+            <span className="flex-1 text-left text-sm text-white/55 transition group-hover:text-white/75">
+              Search transactions, alerts, insights…
+            </span>
+            <kbd className="hidden h-6 items-center gap-1 rounded-md border border-white/10 bg-white/[0.06] px-1.5 text-[11px] font-medium tracking-tight text-white/55 sm:inline-flex">
+              ⌘K
+            </kbd>
           </button>
 
+          {/* Mobile / tablet search icon (<lg) — opens fullscreen search sheet (TODO) */}
           <button
             type="button"
-            className="group flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border border-exiqo-purple/35 bg-exiqo-dark/50 transition hover:border-exiqo-purple/55 hover:bg-exiqo-purple/15"
+            onClick={openCommandPalette}
+            aria-label="Open search (Cmd+K)"
+            className="grid h-10 w-10 shrink-0 place-items-center rounded-full border border-white/10 bg-white/[0.04] text-white/70 transition-all duration-300 ease-brand hover:border-white/20 hover:bg-white/[0.06] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/50 lg:hidden"
           >
-            <Settings className="h-[18px] w-[18px] text-exiqo-glow transition-colors group-hover:text-exiqo-pink" strokeWidth={2} />
+            <Search className="h-[18px] w-[18px]" aria-hidden />
+          </button>
+        </div>
+
+        <LiveTicker />
+
+        {/* RIGHT cluster — single rhythm, all chips h-10, gap-2.5 */}
+        <div className="flex shrink-0 items-center gap-2.5">
+          {/* Bank chip — full label at xl+, icon + dot at lg, hidden below lg */}
+          <span
+            className="hidden h-10 items-center gap-2 rounded-full border border-emerald-400/25 bg-emerald-500/10 px-3 text-xs font-medium tracking-wide text-emerald-300 xl:inline-flex"
+            title="Bank linked via Account Aggregator"
+          >
+            <Landmark className="h-3.5 w-3.5" aria-hidden />
+            BANK LINKED
+            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]" />
+          </span>
+          <span
+            className="relative hidden h-10 w-10 place-items-center rounded-full border border-emerald-400/25 bg-emerald-500/10 text-emerald-300 lg:grid xl:hidden"
+            title="Bank linked"
+            aria-label="Bank linked"
+          >
+            <Landmark className="h-4 w-4" aria-hidden />
+            <span className="absolute right-1.5 top-1.5 h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]" />
+          </span>
+
+          {/* Period selector — single segmented pill */}
+          <div ref={periodRef} className="relative">
+            <button
+              type="button"
+              onClick={() => setPeriodOpen((o) => !o)}
+              aria-haspopup="true"
+              aria-expanded={periodOpen}
+              aria-label={`Period: ${periodLabel}. Click to change.`}
+              className="inline-flex h-10 shrink-0 items-center gap-2 rounded-full border border-white/10 bg-white/[0.04] pl-3 pr-2 transition-all duration-300 ease-brand hover:border-white/20 hover:bg-white/[0.06] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/50"
+            >
+              <Calendar className="h-4 w-4 text-white/55" aria-hidden />
+              <span className="hidden text-sm tabular-nums tracking-tight text-white/85 lg:inline">
+                {periodLabel}
+              </span>
+              <ChevronDown
+                className={`h-4 w-4 text-white/55 transition-transform duration-300 ease-brand ${
+                  periodOpen ? "rotate-180" : ""
+                }`}
+                aria-hidden
+              />
+            </button>
+
+            {periodOpen ? (
+              <div className="absolute right-0 top-12 z-50 w-[min(20rem,calc(100vw-2rem))]">
+                <GlassCard
+                  padding="sm"
+                  elevation="raised"
+                  role="dialog"
+                  aria-label="Choose period"
+                  className="border-white/10"
+                >
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <p className="mb-2 px-1 text-[10px] uppercase tracking-[0.18em] text-white/40">
+                        Month
+                      </p>
+                      <ul className="grid grid-cols-3 gap-1">
+                        {MONTH_LABELS.map((m, idx) => {
+                          const isCurrent = idx + 1 === Number(month);
+                          return (
+                            <li key={m}>
+                              <button
+                                type="button"
+                                onClick={() => onMonthChange?.(idx + 1)}
+                                aria-pressed={isCurrent}
+                                className={`grid h-9 w-full place-items-center rounded-lg text-xs font-medium tracking-tight transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/50 ${
+                                  isCurrent
+                                    ? "bg-ss-brand text-white shadow-purple-glow"
+                                    : "text-white/70 hover:bg-white/[0.06] hover:text-white"
+                                }`}
+                              >
+                                {m}
+                              </button>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </div>
+                    <div>
+                      <p className="mb-2 px-1 text-[10px] uppercase tracking-[0.18em] text-white/40">
+                        Year
+                      </p>
+                      <ul className="space-y-1">
+                        {yearOptions.map((y) => {
+                          const isCurrent = y === Number(year);
+                          return (
+                            <li key={y}>
+                              <button
+                                type="button"
+                                onClick={() => onYearChange?.(y)}
+                                aria-pressed={isCurrent}
+                                className={`flex h-9 w-full items-center justify-center rounded-lg text-sm font-medium tabular-nums tracking-tight transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/50 ${
+                                  isCurrent
+                                    ? "bg-ss-brand text-white shadow-purple-glow"
+                                    : "text-white/70 hover:bg-white/[0.06] hover:text-white"
+                                }`}
+                              >
+                                {y}
+                              </button>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </div>
+                  </div>
+                </GlassCard>
+              </div>
+            ) : null}
+          </div>
+
+          {/* Notifications — live bell with unread badge */}
+          <NotificationsBell userId={userId} />
+
+          {/* Settings — hidden on the very narrow phones to keep < 320px layouts intact */}
+          <button
+            type="button"
+            aria-label="Settings"
+            className="hidden h-10 w-10 shrink-0 place-items-center rounded-full border border-white/10 bg-white/[0.04] text-white/70 transition-all duration-300 ease-brand hover:border-white/20 hover:bg-white/[0.06] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/50 sm:grid"
+          >
+            <Settings className="h-[18px] w-[18px]" />
           </button>
 
+          {/* User chip */}
           <button
             type="button"
-            className="flex h-12 shrink-0 items-center gap-2 rounded-xl border border-exiqo-purple/40 bg-gradient-to-r from-exiqo-purple/12 to-exiqo-pink/12 px-2.5 transition hover:border-exiqo-purple/60 sm:pr-3"
+            aria-label={`Account menu for ${displayName}`}
+            className="flex h-10 shrink-0 items-center gap-2.5 rounded-full border border-white/10 bg-white/[0.04] p-1 transition-all duration-300 ease-brand hover:border-white/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/50 md:pr-3"
           >
-            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-exiqo-purple to-exiqo-pink text-xs font-bold text-white shadow-md">
+            <span className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-ss-brand text-xs font-semibold text-white">
               {initial}
-            </div>
-            <div className="hidden min-w-0 max-w-[7rem] text-left md:block lg:max-w-[9rem]">
-              <p className="truncate text-xs font-medium leading-tight text-white">{displayName}</p>
-              <p className="text-[10px] font-medium leading-tight text-exiqo-pink/90">Premium</p>
-            </div>
+            </span>
+            <span className="hidden flex-col items-start leading-tight md:flex">
+              <span className="max-w-[8rem] truncate text-[13px] text-white/90">
+                {displayName}
+              </span>
+              <span className="text-[10px] tracking-wide text-ss-cyan">Premium</span>
+            </span>
+            <ChevronDown className="hidden h-4 w-4 text-white/45 md:block" aria-hidden />
           </button>
         </div>
       </div>

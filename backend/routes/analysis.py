@@ -14,6 +14,91 @@ from services.scorer import calculate_health_score
 router = APIRouter(prefix="/analysis", tags=["analysis"])
 
 
+def _trends_rows_need_transaction_fallback(trends: list[MonthlyTrend]) -> bool:
+    """
+    Use live transaction aggregation when there is no summary, or summary exists
+    but every stored month has zero income and zero expense (stale / placeholder rows).
+    When any month has income > 0 or expense > 0, keep ``monthly_summary`` as source of truth.
+    """
+    if not trends:
+        return True
+
+    def _z(x: float) -> bool:
+        return abs(float(x or 0)) < 1e-6
+
+    return all(_z(t.income) and _z(t.expense) for t in trends)
+
+
+def _monthly_trends_from_transactions(cur, user_id: int) -> list[MonthlyTrend]:
+    """
+    Last 12 calendar months ending at CURRENT_DATE (user-wide; not scoped to dashboard M/Y).
+    Income = CREDIT, expense = DEBIT; saved = max(0, income - expense).
+    health_score / anomaly_count from monthly_summary for that month when present, else 0.
+    """
+    cur.execute(
+        """
+        WITH bounds AS (
+            SELECT
+                (date_trunc('month', CURRENT_DATE::timestamp) - interval '11 months')::date AS start_m,
+                date_trunc('month', CURRENT_DATE::timestamp)::date AS end_m
+        ),
+        months AS (
+            SELECT gs::date AS month_start
+            FROM generate_series(
+                (SELECT start_m FROM bounds),
+                (SELECT end_m FROM bounds),
+                interval '1 month'
+            ) AS gs
+        ),
+        tx AS (
+            SELECT
+                EXTRACT(YEAR FROM t.transaction_date)::int AS y,
+                EXTRACT(MONTH FROM t.transaction_date)::int AS m,
+                COALESCE(SUM(CASE WHEN t.type = 'CREDIT' THEN t.amount ELSE 0 END), 0)::float AS income,
+                COALESCE(SUM(CASE WHEN t.type = 'DEBIT' THEN t.amount ELSE 0 END), 0)::float AS expense
+            FROM transactions t
+            WHERE t.user_id = %s
+              AND t.transaction_date >= (SELECT start_m FROM bounds)
+              AND t.transaction_date < ((SELECT end_m FROM bounds) + interval '1 month')
+            GROUP BY EXTRACT(YEAR FROM t.transaction_date), EXTRACT(MONTH FROM t.transaction_date)
+        )
+        SELECT
+            EXTRACT(YEAR FROM mo.month_start)::int AS year,
+            EXTRACT(MONTH FROM mo.month_start)::int AS month,
+            COALESCE(tx.income, 0)::float AS income,
+            COALESCE(tx.expense, 0)::float AS expense,
+            GREATEST(0, COALESCE(tx.income, 0) - COALESCE(tx.expense, 0))::float AS saved,
+            COALESCE(ms.health_score, 0)::int AS health_score,
+            COALESCE(ms.anomaly_count, 0)::int AS anomaly_count
+        FROM months mo
+        LEFT JOIN tx
+          ON tx.y = EXTRACT(YEAR FROM mo.month_start)::int
+         AND tx.m = EXTRACT(MONTH FROM mo.month_start)::int
+        LEFT JOIN monthly_summary ms
+          ON ms.user_id = %s
+         AND ms.year = EXTRACT(YEAR FROM mo.month_start)::int
+         AND ms.month = EXTRACT(MONTH FROM mo.month_start)::int
+        ORDER BY year ASC, month ASC;
+        """,
+        (user_id, user_id),
+    )
+    rows = cur.fetchall()
+    out: list[MonthlyTrend] = []
+    for r in rows:
+        y, m = int(r[0]), int(r[1])
+        out.append(
+            MonthlyTrend(
+                month=f"{y}-{m:02d}",
+                income=float(r[2] or 0),
+                expense=float(r[3] or 0),
+                saved=float(r[4] or 0),
+                health_score=int(r[5] or 0),
+                anomaly_count=int(r[6] or 0),
+            )
+        )
+    return out
+
+
 @router.get("/{user_id}/spending", response_model=list[SpendingAnalysis])
 def spending_by_category(
     user_id: int,
@@ -82,6 +167,12 @@ def spending_by_category(
 
 @router.get("/{user_id}/trends", response_model=list[MonthlyTrend])
 def monthly_trends(user_id: int, conn=Depends(get_db)):
+    """
+    Rolling last-12-month series (newest month = current calendar month in DB session).
+    Prefers ``monthly_summary``; if empty or all income/expense are zero, aggregates from
+    ``transactions`` so demos work when summary was never backfilled. Dashboard month/year
+    filters do not apply here — spending pie remains month-scoped via ``/spending``.
+    """
     cur = conn.cursor()
     try:
         cur.execute(
@@ -96,7 +187,7 @@ def monthly_trends(user_id: int, conn=Depends(get_db)):
             (user_id,),
         )
         rows = cur.fetchall()
-        out = []
+        out: list[MonthlyTrend] = []
         for r in rows:
             y, m = int(r[0]), int(r[1])
             out.append(
@@ -109,7 +200,10 @@ def monthly_trends(user_id: int, conn=Depends(get_db)):
                     anomaly_count=int(r[6] or 0),
                 )
             )
-        return list(reversed(out))
+        summary_series = list(reversed(out))
+        if _trends_rows_need_transaction_fallback(summary_series):
+            return _monthly_trends_from_transactions(cur, user_id)
+        return summary_series
     except Exception as e:
         raise HTTPException(500, str(e)) from e
     finally:

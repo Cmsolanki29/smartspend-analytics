@@ -17,7 +17,7 @@
   --border-color: #334155;
   --card-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3);
 
-  /* EXIQO brand (auth + accents) */
+  /* SmartSpend brand (auth + accents) — variable names below are referenced from legacy auth styles. */
   --exiqo-primary: #8b5cf6;
   --exiqo-violet: #a78bfa;
   --exiqo-pink: #ec4899;
@@ -2488,7 +2488,7 @@ button:disabled {
   border: 0;
 }
 
-/* App shell — subtle EXIQO gradient orbs (authenticated layout) */
+/* App shell — subtle SmartSpend gradient orbs (authenticated layout) */
 @keyframes exiqo-orb-pulse {
   0%,
   100% {

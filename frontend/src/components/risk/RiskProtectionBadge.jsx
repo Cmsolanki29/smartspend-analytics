@@ -1,7 +1,7 @@
 /**
  * RiskProtectionBadge — always-visible status badge (top of header/sidebar).
  * Shows 8-phase shield when risk engine is healthy, or a muted offline pill.
- * Clicking it navigates to the Trust Center tab.
+ * Clicking it opens FraudShield (unified protection hub).
  */
 
 import React from "react";
@@ -19,7 +19,7 @@ export function RiskProtectionBadge({ onNavigate, compact = false }) {
 
   return (
     <motion.button
-      onClick={() => onNavigate?.("trust-center")}
+      onClick={() => onNavigate?.("fraud")}
       whileHover={{ scale: 1.03 }}
       whileTap={{ scale: 0.97 }}
       className={`

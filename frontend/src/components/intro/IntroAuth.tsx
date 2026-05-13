@@ -14,10 +14,12 @@ import {
 import {
   ChangeEvent,
   FormEvent,
+  type HTMLAttributes,
   ReactNode,
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import { useAuth } from "../../context/AuthContext";
@@ -47,6 +49,8 @@ type FloatingInputProps = {
   id: string;
   label: string;
   type?: string;
+  /** Use with `type="text"` so `.local` demo addresses are not blocked by the browser. */
+  inputMode?: HTMLAttributes<HTMLInputElement>["inputMode"];
   value: string;
   onChange: (e: ChangeEvent<HTMLInputElement>) => void;
   autoComplete?: string;
@@ -58,6 +62,7 @@ function FloatingInput({
   id,
   label,
   type = "text",
+  inputMode,
   value,
   onChange,
   autoComplete,
@@ -71,6 +76,7 @@ function FloatingInput({
       <input
         id={id}
         type={type}
+        inputMode={inputMode}
         value={value}
         onChange={onChange}
         autoComplete={autoComplete}
@@ -413,6 +419,16 @@ export function IntroAuth({
   const [busy, setBusy] = useState(false);
   const [success, setSuccess] = useState(false);
   const [error, setError] = useState("");
+  const successTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (successTimerRef.current != null) {
+        window.clearTimeout(successTimerRef.current);
+        successTimerRef.current = null;
+      }
+    };
+  }, []);
 
   // Reset transient state when switching tabs
   useEffect(() => {
@@ -432,9 +448,16 @@ export function IntroAuth({
         } else {
           await signup({ name: name.trim(), email: email.trim(), password });
         }
+        setBusy(false);
         setSuccess(true);
-        // Allow check-burst to play before clearing the flow
-        window.setTimeout(onAuthenticated, reduce ? 350 : 1100);
+        if (successTimerRef.current != null) {
+          window.clearTimeout(successTimerRef.current);
+        }
+        const delayMs = reduce ? 220 : 720;
+        successTimerRef.current = window.setTimeout(() => {
+          successTimerRef.current = null;
+          onAuthenticated();
+        }, delayMs);
       } catch (err: unknown) {
         setBusy(false);
         setError(err instanceof Error ? err.message : "Something went wrong. Please try again.");
@@ -592,7 +615,8 @@ export function IntroAuth({
               <FloatingInput
                 id="auth-email"
                 label="Email address"
-                type="email"
+                type="text"
+                inputMode="email"
                 autoComplete="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
@@ -635,13 +659,19 @@ export function IntroAuth({
               {/* Legal */}
               <p className="pt-1 text-center text-[11px] leading-relaxed text-white/45">
                 By continuing you agree to the{" "}
-                <a className="underline-offset-2 hover:text-white/80 hover:underline" href="#">
+                <button
+                  type="button"
+                  className="cursor-pointer border-0 bg-transparent p-0 font-inherit text-inherit underline-offset-2 hover:text-white/80 hover:underline"
+                >
                   Terms
-                </a>{" "}
+                </button>{" "}
                 and{" "}
-                <a className="underline-offset-2 hover:text-white/80 hover:underline" href="#">
+                <button
+                  type="button"
+                  className="cursor-pointer border-0 bg-transparent p-0 font-inherit text-inherit underline-offset-2 hover:text-white/80 hover:underline"
+                >
                   Privacy Policy
-                </a>
+                </button>
                 .
               </p>
             </form>

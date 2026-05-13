@@ -6,6 +6,7 @@
 
 import React, { useEffect, useState } from "react";
 import { motion } from "framer-motion";
+import { MasteryJourneyRail } from "../../components/journey/MasteryJourneyRail";
 import {
   ShieldCheck, ShieldOff, Zap, ArrowRight, BarChart2, Bell,
   User, Fingerprint, TrendingUp, DollarSign, Bot, Share2,
@@ -221,7 +222,7 @@ function AdvancedPhasesPanel({ userId }) {
   );
 }
 
-const TrustCenter = ({ userId, onNavigate }) => {
+const TrustCenter = ({ userId, onNavigate, journeyPhase = 1, journeyComplete = false, onNavigateToTab, onAdvancePhase }) => {
   const { healthy, dbConnected, mlReady, version, lastCheckedAt } = useRisk();
   const [fraudStats, setFraudStats] = useState(null);
   const [healthScore, setHealthScore] = useState(null);
@@ -270,6 +271,17 @@ const TrustCenter = ({ userId, onNavigate }) => {
 
   return (
     <div className="max-w-3xl mx-auto space-y-6 pb-8">
+      {/* 12-phase AI Risk rail — sticky under TopBar, Trust Center only */}
+      <div className="sticky top-16 z-30 -mx-4 md:-mx-6 lg:-mx-10 px-4 md:px-6 lg:px-10 bg-ss-bg-deep/80 backdrop-blur-2xl border-b border-white/5 pb-3 pt-2">
+        <MasteryJourneyRail
+          currentPhase={journeyPhase}
+          journeyComplete={journeyComplete}
+          onNavigateToTab={onNavigateToTab ?? (() => {})}
+          onAdvancePhase={onAdvancePhase}
+          activeTab="trust-center"
+        />
+      </div>
+
       {/* Page header */}
       <motion.div
         initial={{ opacity: 0, y: 12 }}

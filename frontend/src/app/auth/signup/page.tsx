@@ -101,7 +101,8 @@ export default function SignUpPage({ onSwitchToSignin }: SignUpPageProps) {
           <input
             id="su-email"
             className={inputClass}
-            type="email"
+            type="text"
+            inputMode="email"
             placeholder="john@example.com"
             autoComplete="email"
             value={form.email}

@@ -11,6 +11,11 @@ import { useToast } from "../common/Toast";
 import { EmptyState } from "../common/EmptyState";
 import { ErrorCard } from "../common/ErrorCard";
 import { SkeletonCard } from "../common/SkeletonCard";
+import { PageHeader } from "../Dashboard/shared/PageHeader";
+import { HeroKpiTile } from "../Dashboard/shared/HeroKpiTile";
+import { inr } from "../../lib/format";
+
+const ACCENT = "#EC4899";
 
 const fmt = (n) =>
   new Intl.NumberFormat("en-IN", {
@@ -106,6 +111,18 @@ const FestivalPredictor = ({ userId }) => {
   useEffect(() => {
     load();
   }, [load]);
+
+  useEffect(() => {
+    const onSync = (e) => {
+      if (e?.detail?.userId === userId) load();
+    };
+    window.addEventListener("smartspend-financial-sync", onSync);
+    window.addEventListener("smartspend:purchase-goals-changed", onSync);
+    return () => {
+      window.removeEventListener("smartspend-financial-sync", onSync);
+      window.removeEventListener("smartspend:purchase-goals-changed", onSync);
+    };
+  }, [userId, load]);
 
   const openBudget = (f) => {
     setBudgetFest(f);
@@ -324,14 +341,27 @@ const FestivalPredictor = ({ userId }) => {
     });
   }, [importantDays]);
 
+  const daysAway      = nf?.days_remaining ?? nf?.days_away ?? null;
+  const festivalName  = nf?.festival_name ?? "Next festival";
+  const suggestedBudget = nf?.recommended_budget ?? 0;
+
   return (
     <div className="festival-page fade-in">
-      <header className="festival-hero glass-card">
-        <div>
-          <h2 className="festival-title">🪔 Festival Financial Planner</h2>
-          <p className="festival-sub">Plan ahead — avoid financial stress later</p>
-        </div>
-      </header>
+      <PageHeader
+        eyebrow="FESTIVALS"
+        title="Plan the Celebration"
+        subtitle="Save before festivals hit. Budget smarter, celebrate guilt-free, no financial hangover."
+        accentHex={ACCENT}
+        rightSlot={
+          <HeroKpiTile
+            label="Days to next festival"
+            value={daysAway != null ? String(daysAway) : "—"}
+            caption={`${festivalName} · suggested ${inr(suggestedBudget)}`}
+            accentHex={ACCENT}
+            loading={loading}
+          />
+        }
+      />
 
       {loading && (
         <div className="glass-card feature-card" style={{ marginBottom: 14 }}>

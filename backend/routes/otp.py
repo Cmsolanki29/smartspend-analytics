@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import random
-from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
@@ -56,40 +55,78 @@ async def send_otp(data: SendOTPRequest) -> dict[str, int | str | bool]:
 
 @router.post("/verify")
 async def verify_otp(data: VerifyOTPRequest) -> dict[str, str | bool]:
-    """Verify OTP code against latest record for mobile number."""
+    """
+    Verify OTP against the latest row for this mobile.
+
+    Expiry and code checks run entirely in PostgreSQL (no Python datetime compares).
+    """
     conn = get_connection()
     cur = conn.cursor()
     try:
         cur.execute(
             """
-            SELECT id, otp_code, expires_at, verified
+            UPDATE otp_verifications AS ov
+            SET verified = TRUE
+            WHERE ov.id = (
+                SELECT id
+                FROM otp_verifications
+                WHERE mobile_number = %s
+                  AND verified = FALSE
+                  AND NOT (expires_at < NOW())
+                  AND otp_code::text = %s
+                ORDER BY created_at DESC
+                LIMIT 1
+            )
+            RETURNING ov.id
+            """,
+            (data.mobile_number, data.otp_code),
+        )
+        updated = cur.fetchone()
+        if updated:
+            # Do not UPDATE users here: OTP runs before mobile is stored on the user row,
+            # and older deployments used a non-existent `phone` column. `otp_verifications.verified`
+            # is the source of truth; link-bank sets mobile_number + is_verified by user id.
+            conn.commit()
+            return {
+                "success": True,
+                "message": "OTP verified successfully",
+                "mobile_number": data.mobile_number,
+            }
+
+        cur.execute(
+            """
+            SELECT
+                verified,
+                (expires_at < NOW()) AS is_expired,
+                (otp_code::text = %s) AS code_ok
             FROM otp_verifications
             WHERE mobile_number = %s
             ORDER BY created_at DESC
             LIMIT 1
             """,
-            (data.mobile_number,),
+            (data.otp_code, data.mobile_number),
         )
-        row = cur.fetchone()
-        if not row:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No OTP found for this number")
+        row2 = cur.fetchone()
+        conn.rollback()
 
-        otp_id, otp_code, expires_at, verified = row[0], row[1], row[2], row[3]
+        if not row2:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No OTP found for this number",
+            )
+        verified, is_expired, code_ok = bool(row2[0]), bool(row2[1]), bool(row2[2])
         if verified:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="OTP already used")
-        if datetime.now(timezone.utc) > expires_at:
+        if is_expired:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="OTP expired")
-        if str(otp_code) != data.otp_code:
+        if not code_ok:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid OTP")
-
-        cur.execute("UPDATE otp_verifications SET verified = TRUE WHERE id = %s", (otp_id,))
-        cur.execute(
-            "UPDATE users SET is_verified = TRUE WHERE phone = %s",
-            (data.mobile_number,),
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="OTP verification failed",
         )
-        conn.commit()
-        return {"success": True, "message": "OTP verified successfully", "mobile_number": data.mobile_number}
     except HTTPException:
+        conn.rollback()
         raise
     except Exception as exc:  # noqa: BLE001
         conn.rollback()

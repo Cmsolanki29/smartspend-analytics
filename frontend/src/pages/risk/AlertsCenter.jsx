@@ -15,7 +15,7 @@ import React, { useState, useMemo, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   ShieldOff, CheckCircle, XCircle, Clock, Loader2, RefreshCw, Inbox,
-  AlertTriangle, ChevronDown, ChevronRight, Sparkles,
+  AlertTriangle,
 } from "lucide-react";
 import { useFeedbackStats } from "../../hooks/risk/useFeedbackStats";
 import {
@@ -25,6 +25,8 @@ import {
   triggerInvestigation,
 } from "../../services/riskApi";
 import { RiskStatePlaceholder } from "../../components/risk/RiskStatePlaceholder";
+import { InvestigationVerdict } from "../../components/risk/InvestigationVerdict";
+import { AlertDrawer } from "../../components/FraudShield/AlertDrawer";
 import { fmtCurrency, fmtRelativeTime } from "../../utils/risk/formatters";
 
 // ── Demo fallback queue ────────────────────────────────────────────────────
@@ -104,181 +106,17 @@ const STATUS_META = {
   dismissed:{ color: "#6b7280", bg: "#f3f4f6", icon: XCircle,      label: "Dismissed" },
 };
 
-// Phase 9 action → colour palette for the verdict pill.
-const VERDICT_PALETTE = {
-  ALLOW:       { bg: "#10b98122", border: "#10b98155", text: "#34d399" },
-  FLAG:        { bg: "#f59e0b22", border: "#f59e0b55", text: "#fbbf24" },
-  BLOCK:       { bg: "#ef444422", border: "#ef444455", text: "#f87171" },
-  INVESTIGATE: { bg: "#a855f722", border: "#a855f755", text: "#c084fc" },
-};
+// ── Queue row + drawer (Phase 7 SHAP in AlertDrawer) ───────────────────────
 
-function fmtUsd4(v) {
-  const n = Number(v);
-  if (!Number.isFinite(n)) return "—";
-  return `$${n.toFixed(4)}`;
-}
-
-// ── Inline Phase 9 verdict panel ───────────────────────────────────────────
-function InvestigationVerdict({ txnId, state, onRefresh, onTrigger }) {
-  const [expanded, setExpanded] = useState(false);
-  const [running, setRunning] = useState(false);
-
-  const runIt = async () => {
-    setRunning(true);
-    try {
-      await onTrigger(txnId);
-    } finally {
-      setRunning(false);
-    }
-  };
-
-  // Loading (initial fetch).
-  if (state === undefined) {
-    return (
-      <div className="mt-3 px-3 py-2.5 rounded-lg border border-white/10 bg-white/[0.03] flex items-center gap-2">
-        <Loader2 size={12} className="animate-spin text-purple-300" />
-        <span className="text-[11px] text-exiqo-glow/60">Loading verdict…</span>
-      </div>
-    );
-  }
-
-  // No investigation yet (404).
-  if (state === null) {
-    return (
-      <div className="mt-3 px-3 py-2.5 rounded-lg border border-white/10 bg-white/[0.03] flex items-center justify-between gap-2">
-        <span className="text-[11px] text-exiqo-glow/50 inline-flex items-center gap-1.5">
-          <Sparkles size={11} className="text-purple-300" />
-          No Phase 9 investigation yet
-        </span>
-        <button
-          type="button"
-          onClick={runIt}
-          disabled={running}
-          className="inline-flex items-center gap-1 text-[11px] px-2.5 py-1 rounded-md border border-purple-500/30
-                     bg-purple-500/10 text-purple-200 hover:bg-purple-500/20 disabled:opacity-60 transition"
-        >
-          {running ? <Loader2 size={11} className="animate-spin" /> : <Sparkles size={11} />}
-          {running ? "Running…" : "Run Investigation →"}
-        </button>
-      </div>
-    );
-  }
-
-  // Verdict available.
-  // Backend returns `decision` (Phase 9 agent) — frontend also accepts `recommended_action` (Phase 12 format).
-  const action = String(
-    state.recommended_action || state.decision || state.action || "INVESTIGATE"
-  ).toUpperCase().replace("INCONCLUSIVE", "INVESTIGATE");
-  const palette = VERDICT_PALETTE[action] || VERDICT_PALETTE.INVESTIGATE;
-  // Backend returns `narrative`; also accept `reasoning` and `agent_reasoning` for forward compat.
-  const reasoning =
-    state.reasoning || state.agent_reasoning || state.narrative || state.summary || "";
-  const cost = state.cost_usd ?? state.cost ?? null;
-  const confidence = state.confidence != null ? Number(state.confidence) : null;
-  // Backend stores evidence in `key_evidence`; also accept `evidence` array.
-  const evidence = Array.isArray(state.key_evidence)
-    ? state.key_evidence
-    : Array.isArray(state.evidence)
-    ? state.evidence
-    : [];
-  const recommendation = state.recommendation || state.recommended_action_reason || state.suggestion || "";
-
-  return (
-    <div className="mt-3 rounded-lg border border-white/10 bg-white/[0.03] overflow-hidden">
-      {/* Header strip */}
-      <div className="flex items-center gap-2 px-3 py-2 flex-wrap">
-        <span
-          className="inline-flex items-center gap-1 text-[11px] font-bold px-2 py-0.5 rounded-full border"
-          style={{ background: palette.bg, borderColor: palette.border, color: palette.text }}
-        >
-          <Sparkles size={10} />
-          {action}
-        </span>
-        {confidence != null && Number.isFinite(confidence) && (
-          <span className="text-[11px] text-exiqo-glow/50">
-            {(confidence * 100).toFixed(1)}% confidence
-          </span>
-        )}
-        <span className="text-[11px] text-exiqo-glow/40">
-          cost {fmtUsd4(cost)}
-        </span>
-        <div className="ml-auto flex items-center gap-1">
-          <button
-            type="button"
-            onClick={() => onRefresh(txnId)}
-            className="text-[10px] inline-flex items-center gap-1 px-2 py-0.5 rounded-md
-                       border border-white/10 text-exiqo-glow/60 hover:text-exiqo-glow/90
-                       hover:bg-white/[0.05] transition"
-            title="Re-fetch verdict"
-          >
-            <RefreshCw size={10} />
-            Refresh
-          </button>
-          <button
-            type="button"
-            onClick={() => setExpanded((v) => !v)}
-            className="text-[10px] inline-flex items-center gap-1 px-2 py-0.5 rounded-md
-                       border border-white/10 text-exiqo-glow/60 hover:text-exiqo-glow/90
-                       hover:bg-white/[0.05] transition"
-          >
-            {expanded ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
-            Details
-          </button>
-        </div>
-      </div>
-
-      {/* Confidence bar */}
-      {confidence != null && Number.isFinite(confidence) && (
-        <div className="px-3 pb-2">
-          <div className="h-1.5 w-full rounded-full bg-white/[0.06] overflow-hidden">
-            <div
-              className="h-full rounded-full transition-all duration-700"
-              style={{ width: `${Math.min(100, confidence * 100)}%`, background: palette.text }}
-            />
-          </div>
-        </div>
-      )}
-
-      {/* Collapsible details */}
-      {expanded && (
-        <div className="px-3 pb-3 pt-1 border-t border-white/[0.06] space-y-2">
-          {reasoning ? (
-            <div>
-              <p className="text-[10px] uppercase tracking-wider text-exiqo-glow/40 font-semibold mb-1">Reasoning</p>
-              <p className="text-[11px] text-exiqo-glow/70 leading-relaxed whitespace-pre-wrap">
-                {reasoning}
-              </p>
-            </div>
-          ) : null}
-          {evidence.length > 0 && (
-            <div>
-              <p className="text-[10px] uppercase tracking-wider text-exiqo-glow/40 font-semibold mb-1">Evidence</p>
-              <ul className="space-y-0.5">
-                {evidence.map((e, i) => (
-                  <li key={i} className="text-[11px] text-exiqo-glow/60 flex gap-1.5 leading-snug">
-                    <span className="text-purple-400 shrink-0 mt-0.5">&#8226;</span>
-                    {e}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-          {recommendation && (
-            <div className="rounded-lg border border-purple-500/20 bg-purple-500/[0.06] px-2.5 py-2">
-              <p className="text-[10px] uppercase tracking-wider text-purple-400/70 font-semibold mb-0.5">Recommendation</p>
-              <p className="text-[11px] text-purple-200/80 leading-snug">{recommendation}</p>
-            </div>
-          )}
-          {!reasoning && evidence.length === 0 && !recommendation && (
-            <p className="text-[11px] text-exiqo-glow/40 italic">Agent did not return a textual narrative.</p>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function QueueItem({ item, onDecide, deciding, investigationState, onRefreshInv, onTriggerInv }) {
+function QueueItem({
+  item,
+  onDecide,
+  deciding,
+  investigationState,
+  onRefreshInv,
+  onTriggerInv,
+  onOpenDetail,
+}) {
   const meta = STATUS_META[item.status] || STATUS_META.pending;
   const StatusIcon = meta.icon;
   const severityKey = getSeverityFromItem(item);
@@ -290,7 +128,17 @@ function QueueItem({ item, onDecide, deciding, investigationState, onRefreshInv,
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, x: -20 }}
-      className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden"
+      role="button"
+      tabIndex={0}
+      onClick={() => onOpenDetail?.(item)}
+      onKeyDown={(e) => {
+        if (!onOpenDetail) return;
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onOpenDetail(item);
+        }
+      }}
+      className="cursor-pointer overflow-hidden rounded-xl border border-gray-100 bg-white shadow-sm transition hover:border-violet-200/80 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/50"
     >
       <div className="p-4">
         <div className="flex items-start gap-3">
@@ -327,7 +175,7 @@ function QueueItem({ item, onDecide, deciding, investigationState, onRefreshInv,
         </div>
 
         {item.status === "pending" && (
-          <div className="flex gap-2 mt-3 ml-11">
+          <div className="ml-11 mt-3 flex gap-2" onClick={(e) => e.stopPropagation()}>
             <button
               type="button"
               onClick={() => onDecide(item.id, "fraud")}
@@ -355,7 +203,7 @@ function QueueItem({ item, onDecide, deciding, investigationState, onRefreshInv,
             For demo TXN-99* ids the trigger will fail gracefully; the button
             still demonstrates the Phase 9 UI affordance to judges. */}
         {item.transaction_id && (
-          <div className="ml-11">
+          <div className="ml-11 mt-3" onClick={(e) => e.stopPropagation()}>
             <InvestigationVerdict
               txnId={item.transaction_id}
               state={investigationState}
@@ -390,6 +238,7 @@ function getSeverityFromItem(item) {
 
 const AlertsCenter = ({ userId }) => {
   const { data: realStats } = useFeedbackStats();
+  const [drawerItem, setDrawerItem] = useState(null);
   const [decidingId, setDecidingId] = useState(null);
   const [localDecisions, setLocalDecisions] = useState({});
   const [enrichedQueue, setEnrichedQueue] = useState(null);
@@ -493,7 +342,7 @@ const AlertsCenter = ({ userId }) => {
   const triggerOneInvestigation = useCallback(async (txnId) => {
     setInvestigations((prev) => ({ ...prev, [txnId]: undefined }));
     try {
-      const value = await triggerInvestigation(txnId, null, "manual");
+      const value = await triggerInvestigation(txnId, userId ?? null, "manual");
       setInvestigations((prev) => ({ ...prev, [txnId]: value || null }));
     } catch {
       // On failure, fall back to one more GET in case the trigger
@@ -505,7 +354,7 @@ const AlertsCenter = ({ userId }) => {
         setInvestigations((prev) => ({ ...prev, [txnId]: null }));
       }
     }
-  }, []);
+  }, [userId]);
 
   const stats = (!usingDemo && enrichedQueue?.length > 0)
     ? { total_reports: enrichedQueue.length, confirmed_fraud: 0, accuracy_delta: 0 }
@@ -535,6 +384,7 @@ const AlertsCenter = ({ userId }) => {
   const resolved = filteredQueue.filter((q) => q.status !== "pending");
 
   return (
+    <>
     <div className="max-w-3xl mx-auto space-y-6 pb-8">
       {/* Header */}
       <motion.div
@@ -633,9 +483,12 @@ const AlertsCenter = ({ userId }) => {
         <>
           {pending.length > 0 && (
             <div>
-              <h3 className="text-sm font-semibold text-white mb-3 uppercase tracking-wider opacity-60">
+              <h3 className="mb-3 text-sm font-semibold uppercase tracking-wider text-white opacity-60">
                 Awaiting review ({pending.length})
               </h3>
+              <p className="mb-3 text-[11px] text-exiqo-glow/50">
+                Click any alert for Phase 7 SHAP drivers, full transaction context, and Run Investigation.
+              </p>
               <div className="space-y-2">
                 <AnimatePresence>
                   {pending.map((item) => (
@@ -649,6 +502,7 @@ const AlertsCenter = ({ userId }) => {
                       }
                       onRefreshInv={refreshOneInvestigation}
                       onTriggerInv={triggerOneInvestigation}
+                      onOpenDetail={setDrawerItem}
                     />
                   ))}
                 </AnimatePresence>
@@ -673,6 +527,7 @@ const AlertsCenter = ({ userId }) => {
                     }
                     onRefreshInv={refreshOneInvestigation}
                     onTriggerInv={triggerOneInvestigation}
+                    onOpenDetail={setDrawerItem}
                   />
                 ))}
               </div>
@@ -695,6 +550,17 @@ const AlertsCenter = ({ userId }) => {
         </>
       )}
     </div>
+
+    <AlertDrawer
+      item={drawerItem}
+      onClose={() => setDrawerItem(null)}
+      investigationState={
+        drawerItem?.transaction_id ? investigations[drawerItem.transaction_id] : undefined
+      }
+      onRefreshInv={refreshOneInvestigation}
+      onTriggerInv={triggerOneInvestigation}
+    />
+    </>
   );
 };
 

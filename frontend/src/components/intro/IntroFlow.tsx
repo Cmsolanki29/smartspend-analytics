@@ -1,34 +1,47 @@
 import { AnimatePresence, motion } from "framer-motion";
+import { ArrowRight } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
+import { AuroraBackground } from "./AuroraBackground";
+import { GlassCard } from "./GlassCard";
 import { GetStartedScreen } from "./GetStartedScreen";
+import { GradientButton } from "./GradientButton";
 import { IntroAuth, type AuthMode } from "./IntroAuth";
 import { IntroStory } from "./IntroStory";
+import { ShieldMark } from "./ShieldMark";
 import { SplashScreen } from "./SplashScreen";
 
 const BRAND_EASE = [0.22, 1, 0.36, 1] as const;
 
 export const SEEN_INTRO_KEY = "smartspend.seenIntro";
 
-/**
- * Per-tab session key. sessionStorage:
- *   - Survives page refresh → user stays on same step
- *   - Cleared when tab is closed / new tab opens → intro restarts
- */
-const SESSION_STEP_KEY = "smartspend.introStep";
+/** Default unauthenticated flow (splash → … → auth). */
+const SESSION_STEP_KEY_DEFAULT = "smartspend.introStep";
+/** Logged-in users who still need onboarding — separate storage so it does not collide with the sign-in flow. */
+const SESSION_STEP_KEY_PRE_ONBOARD = "smartspend.introStep.preOnboard";
 
-export type IntroStep = "splash" | "intro" | "get-started" | "auth";
+export type IntroStep = "splash" | "intro" | "get-started" | "auth" | "pre-onboard-cta";
 
 export type IntroFlowProps = {
   onComplete: () => void;
+  /**
+   * signIn: full path including Get started + IntroAuth (default).
+   * preOnboarding: splash → intro → one CTA → onComplete (user is already authenticated).
+   */
+  variant?: "signIn" | "preOnboarding";
 };
 
 const SHIELD_LAYOUT_ID = "ssShieldMark";
 
-/** Read step from sessionStorage (per-tab, survives refresh). */
-function readSessionStep(): IntroStep | null {
+function readSessionStep(storageKey: string): IntroStep | null {
   try {
-    const v = window.sessionStorage.getItem(SESSION_STEP_KEY);
-    if (v === "splash" || v === "intro" || v === "get-started" || v === "auth") {
+    const v = window.sessionStorage.getItem(storageKey);
+    if (
+      v === "splash" ||
+      v === "intro" ||
+      v === "get-started" ||
+      v === "auth" ||
+      v === "pre-onboard-cta"
+    ) {
       return v as IntroStep;
     }
     return null;
@@ -37,11 +50,12 @@ function readSessionStep(): IntroStep | null {
   }
 }
 
-/** Persist current step so refresh lands on same screen. */
-function writeSessionStep(step: IntroStep) {
+function writeSessionStep(storageKey: string, step: IntroStep) {
   try {
-    window.sessionStorage.setItem(SESSION_STEP_KEY, step);
-  } catch { /* ignore */ }
+    window.sessionStorage.setItem(storageKey, step);
+  } catch {
+    /* ignore */
+  }
 }
 
 function safeWriteFlag() {
@@ -58,11 +72,16 @@ function safeWriteFlag() {
  *   - Refresh on same tab   → resumes on same step (sessionStorage survives refresh)
  *   - After sign-in         → App.jsx isAuthenticated=true, IntroFlow unmounts
  */
-export function IntroFlow({ onComplete }: IntroFlowProps) {
+export function IntroFlow({ onComplete, variant = "signIn" }: IntroFlowProps) {
+  const sessionKey =
+    variant === "preOnboarding" ? SESSION_STEP_KEY_PRE_ONBOARD : SESSION_STEP_KEY_DEFAULT;
+
   const [step, setStep] = useState<IntroStep>(() => {
-    // Resume position in THIS tab session if the user already progressed.
-    // On a fresh tab sessionStorage is always empty → starts at "splash".
-    return readSessionStep() ?? "splash";
+    const raw = readSessionStep(sessionKey) ?? "splash";
+    if (variant === "preOnboarding" && (raw === "get-started" || raw === "auth")) {
+      return "splash";
+    }
+    return raw;
   });
   const [authMode, setAuthMode] = useState<AuthMode>("signin");
 
@@ -70,44 +89,58 @@ export function IntroFlow({ onComplete }: IntroFlowProps) {
     safeWriteFlag();
   }, []);
 
+  const finishPreOnboarding = useCallback(() => {
+    markSeen();
+    onComplete();
+  }, [markSeen, onComplete]);
+
   const fromSplash = useCallback(() => {
-    writeSessionStep("intro");
+    writeSessionStep(sessionKey, "intro");
     setStep("intro");
-  }, []);
+  }, [sessionKey]);
 
   const fromIntro = useCallback(() => {
-    writeSessionStep("get-started");
+    if (variant === "preOnboarding") {
+      writeSessionStep(sessionKey, "pre-onboard-cta");
+      setStep("pre-onboard-cta");
+      return;
+    }
+    writeSessionStep(sessionKey, "get-started");
     setStep("get-started");
-  }, []);
+  }, [sessionKey, variant]);
 
   const skipToAuth = useCallback(
     (mode: AuthMode = "signin") => {
+      if (variant === "preOnboarding") {
+        finishPreOnboarding();
+        return;
+      }
       markSeen();
-      writeSessionStep("auth");
+      writeSessionStep(sessionKey, "auth");
       setAuthMode(mode);
       setStep("auth");
     },
-    [markSeen]
+    [finishPreOnboarding, markSeen, sessionKey, variant]
   );
 
   const fromGetStartedToCreate = useCallback(() => {
     markSeen();
-    writeSessionStep("auth");
+    writeSessionStep(sessionKey, "auth");
     setAuthMode("signup");
     setStep("auth");
-  }, [markSeen]);
+  }, [markSeen, sessionKey]);
 
   const fromGetStartedToSignin = useCallback(() => {
     markSeen();
-    writeSessionStep("auth");
+    writeSessionStep(sessionKey, "auth");
     setAuthMode("signin");
     setStep("auth");
-  }, [markSeen]);
+  }, [markSeen, sessionKey]);
 
   const onAuthBack = useCallback(() => {
-    writeSessionStep("get-started");
+    writeSessionStep(sessionKey, "get-started");
     setStep("get-started");
-  }, []);
+  }, [sessionKey]);
 
   const onAuthenticated = useCallback(() => {
     markSeen();
@@ -116,12 +149,13 @@ export function IntroFlow({ onComplete }: IntroFlowProps) {
 
   // Write initial step to sessionStorage on first mount so refresh stays on same screen.
   useEffect(() => {
-    writeSessionStep(step);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    writeSessionStep(sessionKey, step);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Defensive: if the URL hash includes #signup or #signin, deep-link.
   useEffect(() => {
+    if (variant === "preOnboarding") return;
     const hash = (window.location.hash || "").toLowerCase();
     if (hash.includes("signup")) {
       setAuthMode("signup");
@@ -130,7 +164,7 @@ export function IntroFlow({ onComplete }: IntroFlowProps) {
       setAuthMode("signin");
       setStep("auth");
     }
-  }, []);
+  }, [variant]);
 
   // NOTE: We intentionally use the default ("sync") AnimatePresence mode here
   // — not "wait" — because the splash → intro shield morph relies on both
@@ -183,6 +217,53 @@ export function IntroFlow({ onComplete }: IntroFlowProps) {
             onSignIn={fromGetStartedToSignin}
             shieldLayoutId={SHIELD_LAYOUT_ID}
           />
+        </motion.div>
+      ) : null}
+
+      {step === "pre-onboard-cta" ? (
+        <motion.div
+          key="pre-onboard-cta"
+          initial={{ opacity: 0, scale: 0.985 }}
+          animate={{
+            opacity: 1,
+            scale: 1,
+            transition: { duration: 0.55, ease: BRAND_EASE },
+          }}
+          exit={{ opacity: 0, transition: { duration: 0.35, ease: BRAND_EASE } }}
+          className="relative flex min-h-[100dvh] w-full items-center justify-center overflow-hidden bg-[#070418] font-sans text-ss-ink"
+        >
+          <AuroraBackground starCount={56} tone="cool" />
+          <header className="absolute inset-x-0 top-0 z-10 flex items-center justify-between px-5 pt-5 md:px-10 md:pt-7">
+            <div className="flex items-center gap-2.5">
+              <ShieldMark layoutId={SHIELD_LAYOUT_ID} stage="complete" size={36} />
+              <span className="font-heading text-base font-semibold tracking-tight text-white">
+                SmartSpend
+              </span>
+            </div>
+          </header>
+          <motion.div
+            className="relative z-10 w-full max-w-md px-5 md:max-w-lg"
+            initial={{ opacity: 0, y: 24 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.65, ease: BRAND_EASE }}
+          >
+            <GlassCard padding="lg" elevation="raised" className="text-center">
+              <div className="mx-auto mb-6 flex h-16 w-16 items-center justify-center">
+                <ShieldMark stage="complete" size={64} />
+              </div>
+              <h1 className="font-heading text-[clamp(1.5rem,4vw,2.1rem)] font-semibold leading-tight tracking-tight text-white">
+                Next: verify and link
+              </h1>
+              <p className="mx-auto mt-4 max-w-sm text-[15px] leading-relaxed text-ss-mute">
+                Confirm your mobile with OTP, then link your bank securely. You can resume anytime.
+              </p>
+              <div className="mt-8">
+                <GradientButton full onClick={finishPreOnboarding} trailingIcon={<ArrowRight size={18} />}>
+                  Continue to verification
+                </GradientButton>
+              </div>
+            </GlassCard>
+          </motion.div>
         </motion.div>
       ) : null}
 

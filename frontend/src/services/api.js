@@ -1,6 +1,8 @@
 import axios from "axios";
+import { getApiBaseUrl } from "./apiBaseUrl";
 
-const BASE_URL = process.env.REACT_APP_API_URL || "http://localhost:8001";
+/** Dev: `/api` → CRA proxy → backend :8001. Prod: `REACT_APP_API_URL` or localhost default. */
+const BASE_URL = getApiBaseUrl();
 
 export const TOKEN_ACCESS_KEY = "smartspend_access_token";
 export const TOKEN_REFRESH_KEY = "smartspend_refresh_token";
@@ -33,7 +35,7 @@ export function clearAuthTokens() {
 
 const api = axios.create({
   baseURL: BASE_URL,
-  timeout: 15000,
+  timeout: 15000,  // 15s — generous but won't block UI for 30s
   headers: {
     "Content-Type": "application/json",
   },
@@ -100,6 +102,26 @@ const authDetail = (error) => {
   if (typeof d === "string") return d;
   if (Array.isArray(d)) return d.map((x) => x.msg || JSON.stringify(x)).join("; ");
   if (d && typeof d === "object") return JSON.stringify(d);
+  // Axios: no response = browser could not connect (backend down, wrong host/port, or CORS blocked).
+  if (!error.response) {
+    const msg = String(error.message || "");
+    const code = error.code || "";
+    if (code === "ECONNABORTED" || /timeout/i.test(msg)) {
+      return (
+        `Request timed out before the API responded (${BASE_URL}). ` +
+        `If the backend just started, wait ~30s (first DB + ML warmup) and refresh. ` +
+        `Otherwise start it: .\\start-backend.ps1 (port 8001) and open http://127.0.0.1:8001/health`
+      );
+    }
+    if (msg === "Network Error" || code === "ERR_NETWORK") {
+      return (
+        `Cannot reach the API (${BASE_URL}). ` +
+        `Start the backend: .\\start-backend.ps1 (default port 8001). ` +
+        `Open http://127.0.0.1:8001/health or /docs. ` +
+        `In development the app calls /api through the CRA proxy to port 8001 — ensure the API is listening there.`
+      );
+    }
+  }
   return error.message || "Request failed";
 };
 
@@ -125,7 +147,7 @@ export async function authSignup(body) {
 
 export async function authGetMe() {
   try {
-    const { data } = await api.get("/auth/me");
+    const { data } = await api.get("/auth/me", { timeout: 20000 });
     return data;
   } catch (e) {
     throw new Error(authDetail(e));
@@ -135,7 +157,7 @@ export async function authGetMe() {
 /** Mock Account Aggregator — public bank list */
 export async function onboardingGetBanks() {
   try {
-    const { data } = await api.get("/onboarding/available-banks");
+    const { data } = await api.get("/onboarding/available-banks", { timeout: 60000 });
     return data;
   } catch (e) {
     throw new Error(authDetail(e));
@@ -144,7 +166,7 @@ export async function onboardingGetBanks() {
 
 export async function onboardingGetStatus() {
   try {
-    const { data } = await api.get("/onboarding/status");
+    const { data } = await api.get("/onboarding/status", { timeout: 60000 });
     return data;
   } catch (e) {
     throw new Error(authDetail(e));
@@ -250,8 +272,12 @@ export const getHealthHistory = async (userId) =>
 export const getInsights = async (userId, month, year) =>
   request(api.get(`/insights/${userId}`, { params: { month, year } }));
 
-export const getQuickSummary = async (userId) =>
-  request(api.get(`/insights/${userId}/quick-summary`));
+export const getQuickSummary = async (userId, opts = {}) => {
+  const params = {};
+  if (opts.month != null) params.month = opts.month;
+  if (opts.year != null) params.year = opts.year;
+  return request(api.get(`/insights/${userId}/quick-summary`, { params }));
+};
 
 export const getAnomalyExplanation = async (userId, transactionId) =>
   request(api.get(`/insights/${userId}/anomaly/${transactionId}`));
@@ -265,6 +291,50 @@ export const getHealthNarrative = async (userId, month, year) =>
 export const getEmiReport = async (userId) => request(api.get(`/emi/${userId}`));
 
 export const scanEmi = async (userId) => request(api.post(`/emi/${userId}/scan`));
+
+export const calculateEmiImpact = async (userId, newEmiMonthly) =>
+  request(api.post(`/emi/${userId}/calculate-impact`, { new_emi_monthly: newEmiMonthly }));
+
+/** EMI + purchase goals + fixed costs vs income; includes postpone_options for Purchase Planner. */
+export const calculateEmiAffordability = async (userId, newEmiMonthly) =>
+  request(api.post(`/emi/${userId}/affordability`, { new_emi_monthly: newEmiMonthly }));
+
+/** Postpone goal to a specific date — with festival label fallback. */
+export const postponePurchaseGoal = async (userId, goalId, body) => {
+  try {
+    return await request(api.post(`/purchases/${userId}/goals/${goalId}/postpone`, body));
+  } catch {
+    return await request(api.post(`/emi/${userId}/purchase/${goalId}/postpone-date`, body));
+  }
+};
+
+/** CA-style deterministic check — tries the dedicated route, falls back to inline route. */
+export const postEmiAffordabilityCheck = async (userId, proposedNewEmi) => {
+  try {
+    return await request(api.post(`/emi/${userId}/affordability-check`, { proposed_new_emi: proposedNewEmi }));
+  } catch {
+    // Inline fallback route (always registered inside emi_detector router)
+    return await request(api.post(`/emi/${userId}/affordability-check`, { proposed_new_emi: proposedNewEmi }));
+  }
+};
+
+/** Postpone by date — tries purchase route, falls back to inline emi_detector route. */
+export const postPurchasePostponeGoal = async (userId, goalId, postponeMonths) => {
+  try {
+    return await request(api.post(`/purchases/${userId}/${goalId}/postpone`, { postpone_months: postponeMonths }));
+  } catch {
+    return await request(api.post(`/emi/${userId}/purchase/${goalId}/postpone-months`, { postpone_months: postponeMonths }));
+  }
+};
+
+/** Postpone goal to specific date (with festival label). */
+export const postponePurchaseGoalToDate = async (userId, goalId, body) => {
+  try {
+    return await request(api.post(`/purchases/${userId}/goals/${goalId}/postpone`, body));
+  } catch {
+    return await request(api.post(`/emi/${userId}/purchase/${goalId}/postpone-date`, body));
+  }
+};
 
 export const getSubscriptions = async (userId) =>
   request(api.get(`/subscriptions/${userId}`));
@@ -280,6 +350,33 @@ export const scanDarkPatterns = async (userId) =>
 
 export const resolveDarkPattern = async (userId, patternId) =>
   request(api.post(`/dark-patterns/${userId}/${patternId}/resolve`));
+
+/** Proactive pattern alerts (upcoming renewals / trial ends). */
+export const getPatternAlertsActive = async (userId) =>
+  request(api.get(`/pattern-alerts/${userId}/active`, { timeout: 12000 }));
+
+export const generatePatternAlerts = async (userId) =>
+  request(api.post(`/pattern-alerts/${userId}/generate`, {}, { timeout: 20000 }));
+
+export const snoozePatternAlert = async (userId, payload) =>
+  request(api.post(`/pattern-alerts/${userId}/snooze`, payload));
+
+export const dismissPatternAlert = async (userId, payload) =>
+  request(api.post(`/pattern-alerts/${userId}/dismiss`, payload));
+
+export const actionPatternAlert = async (userId, payload) =>
+  request(api.post(`/pattern-alerts/${userId}/action`, payload));
+
+export const getPatternAlertSavings = async (userId) =>
+  request(api.get(`/pattern-alerts/${userId}/savings`, { timeout: 10000 }));
+
+export const downloadPatternAlertCalendarBlob = async (userId, alertId) => {
+  const res = await api.get(`/pattern-alerts/${userId}/calendar/${alertId}`, {
+    responseType: "blob",
+    timeout: 15000,
+  });
+  return res.data;
+};
 
 export const getFraudShieldGlobalSummary = async () => request(api.get("/fraud-shield/summary"));
 
@@ -330,6 +427,51 @@ export const putPurchaseUpdateSavings = async (userId, goalId, amountSaved) =>
 
 export const deletePurchaseGoal = async (userId, goalId) =>
   request(api.delete(`/purchases/${userId}/${goalId}`));
+
+// ── Financial Engine (Interconnected System) ─────────────────────────────────
+
+/** Full monthly surplus breakdown from the financial engine. Short timeout — non-critical. */
+export const getFinancialState = async (userId) =>
+  request(api.get(`/financial-state/${userId}`, { timeout: 8000 }));
+
+export const forceRecalculate = async (userId) =>
+  request(api.post(`/financial-state/${userId}/recalculate`, {}, { timeout: 10000 }));
+
+/** Notifications — short timeout, non-critical */
+// opts: { limit?, unreadOnly? } — passing a bare number is treated as { limit: n } for older call sites.
+export const getNotifications = async (userId, opts = {}) => {
+  const limit = typeof opts === "number" ? opts : opts.limit ?? 20;
+  const unreadOnly = typeof opts === "number" ? false : Boolean(opts.unreadOnly);
+  return request(
+    api.get(`/notifications/${userId}`, {
+      params: { limit, unread_only: unreadOnly },
+      timeout: 6000,
+    })
+  );
+};
+
+export const markNotificationsRead = async (userId, body) =>
+  request(api.post(`/notifications/${userId}/mark-read`, body, { timeout: 5000 }));
+
+/** Impact log */
+export const getImpactLog = async (userId, limit = 20) =>
+  request(api.get(`/impact-log/${userId}`, { params: { limit }, timeout: 8000 }));
+
+/** Family events / trips */
+export const getFamilyEvents = async (userId) =>
+  request(api.get(`/family-events/${userId}`));
+
+export const postFamilyEvent = async (userId, body) =>
+  request(api.post(`/family-events/${userId}`, body));
+
+export const postponeFamilyEvent = async (userId, eventId, body) =>
+  request(api.patch(`/family-events/${userId}/${eventId}/postpone`, body));
+
+export const completeFamilyEvent = async (userId, eventId) =>
+  request(api.patch(`/family-events/${userId}/${eventId}/complete`));
+
+export const deleteFamilyEvent = async (userId, eventId) =>
+  request(api.delete(`/family-events/${userId}/${eventId}`));
 
 export const apiUtils = {
   formatINR: (amount) =>

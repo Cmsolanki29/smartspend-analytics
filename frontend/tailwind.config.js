@@ -15,6 +15,17 @@ module.exports = {
           navy: "#0A0E27",
           dark: "#1A1F3A",
         },
+        // Per-feature signature accent palette (used ONLY on KPI glow, hero icon, chart primary, active states)
+        feature: {
+          cyan:     "#22D3EE",  // Transactions
+          rose:     "#F43F5E",  // FraudShield
+          violet:   "#A78BFA",  // Insights (AI)
+          amber:    "#F59E0B",  // Subscriptions
+          crimson:  "#DC2626",  // EMI Tracker
+          emerald:  "#10B981",  // Analytics
+          pink:     "#EC4899",  // Festivals
+          sky:      "#38BDF8",  // Purchase Planner
+        },
         // SmartSpend brand tokens (intro flow)
         ss: {
           "bg-deep": "#070418",

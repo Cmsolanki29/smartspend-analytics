@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import {
   AlertTriangle,
   Award,
+  Calendar,
   CheckCircle2,
   Clock,
   Copy,
@@ -16,15 +17,27 @@ import {
   Zap,
 } from "lucide-react";
 import {
+  actionPatternAlert,
   apiUtils,
+  dismissPatternAlert,
+  downloadPatternAlertCalendarBlob,
+  generatePatternAlerts,
   getDarkPatterns,
+  getPatternAlertSavings,
+  getPatternAlertsActive,
   getRupeeTraps,
   resolveDarkPattern,
   scanDarkPatterns,
+  snoozePatternAlert,
 } from "../../services/api";
 import { useToast } from "../common/Toast";
 import { EmptyState } from "../common/EmptyState";
 import { ErrorCard } from "../common/ErrorCard";
+import { PageHeader } from "../Dashboard/shared/PageHeader";
+import { HeroKpiTile } from "../Dashboard/shared/HeroKpiTile";
+import { inr } from "../../lib/format";
+
+const ACCENT = "#10B981";
 
 function formatCompactINR(amount) {
   const x = Number(amount || 0);
@@ -96,6 +109,10 @@ const DarkPatternDetector = ({ userId }) => {
   const [busy, setBusy] = useState(false);
   const [copiedId, setCopiedId] = useState(null);
   const [selectedKey, setSelectedKey] = useState(null);
+  const [proactive, setProactive] = useState(null);
+  const [proactiveSavings, setProactiveSavings] = useState(null);
+  const [proactiveLoading, setProactiveLoading] = useState(false);
+  const [proactiveBusy, setProactiveBusy] = useState(false);
 
   const load = async () => {
     setLoading(true);
@@ -111,8 +128,44 @@ const DarkPatternDetector = ({ userId }) => {
     }
   };
 
+  const loadProactive = async () => {
+    if (!userId) return;
+    setProactiveLoading(true);
+    try {
+      const [active, savings] = await Promise.all([
+        getPatternAlertsActive(userId),
+        getPatternAlertSavings(userId),
+      ]);
+      setProactive(active);
+      setProactiveSavings(savings);
+    } catch {
+      setProactive(null);
+      setProactiveSavings(null);
+    } finally {
+      setProactiveLoading(false);
+    }
+  };
+
+  const runProactiveScan = async () => {
+    if (!userId) return;
+    setProactiveBusy(true);
+    try {
+      await generatePatternAlerts(userId);
+      showToast("Upcoming charges re-scanned from your transactions");
+      await loadProactive();
+    } catch (e) {
+      showToast(e?.message || "Prediction scan failed");
+    } finally {
+      setProactiveBusy(false);
+    }
+  };
+
   useEffect(() => {
     load();
+  }, [userId]);
+
+  useEffect(() => {
+    loadProactive();
   }, [userId]);
 
   const strongestTrap = useMemo(() => {
@@ -191,6 +244,7 @@ const DarkPatternDetector = ({ userId }) => {
     try {
       await scanDarkPatterns(userId);
       await load();
+      await loadProactive();
     } finally {
       setBusy(false);
     }
@@ -216,6 +270,60 @@ const DarkPatternDetector = ({ userId }) => {
       showToast("Evidence copied to clipboard");
     } catch {
       showToast("Could not copy — try again");
+    }
+  };
+
+  const onProactiveSnooze = async (alertId) => {
+    setProactiveBusy(true);
+    try {
+      await snoozePatternAlert(userId, { alert_id: alertId, snooze_hours: 24 });
+      showToast("Reminder snoozed for 24 hours");
+      await loadProactive();
+    } catch (e) {
+      showToast(e?.message || "Snooze failed");
+    } finally {
+      setProactiveBusy(false);
+    }
+  };
+
+  const onProactiveDismiss = async (alertId) => {
+    setProactiveBusy(true);
+    try {
+      await dismissPatternAlert(userId, { alert_id: alertId, reason: "dismissed_in_app" });
+      await loadProactive();
+    } catch (e) {
+      showToast(e?.message || "Dismiss failed");
+    } finally {
+      setProactiveBusy(false);
+    }
+  };
+
+  const onProactiveCancelled = async (alertId) => {
+    setProactiveBusy(true);
+    try {
+      const r = await actionPatternAlert(userId, { alert_id: alertId, action: "cancelled", notes: "" });
+      const saved = Number(r?.savings_added || 0);
+      showToast(saved > 0 ? `Logged cancel — tracked ${inr(saved)}` : "Action saved");
+      await loadProactive();
+    } catch (e) {
+      showToast(e?.message || "Action failed");
+    } finally {
+      setProactiveBusy(false);
+    }
+  };
+
+  const onDownloadIcs = async (alertId) => {
+    try {
+      const blob = await downloadPatternAlertCalendarBlob(userId, alertId);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `smartspend_alert_${alertId}.ics`;
+      a.click();
+      URL.revokeObjectURL(url);
+      showToast("Calendar file downloaded");
+    } catch (e) {
+      showToast(e?.message || "Download failed");
     }
   };
 
@@ -247,49 +355,195 @@ const DarkPatternDetector = ({ userId }) => {
   const showReportLink =
     selectedEvent?.kind === "rupee" || selectedEvent?.severity === "CRITICAL";
 
+  const totalDetected = (patternsData?.patterns?.length || 0) + (rupeeData?.traps?.length || 0);
+  const totalLost     = (rupeeData?.traps || []).reduce((s, t) => s + Number(t.total_lost || 0), 0);
+
   return (
     <div className="mx-auto max-w-6xl space-y-6 pb-6">
-      {/* Hero + quick stats */}
-      <div className="relative overflow-hidden rounded-3xl border-2 border-red-500/30 bg-gradient-to-br from-red-500/20 via-orange-500/10 to-amber-400/15 p-6 sm:p-8">
-        <div className="pointer-events-none absolute inset-0 opacity-40">
-          <div className="absolute left-0 top-0 h-72 w-72 animate-pulse rounded-full bg-red-500/30 mix-blend-screen blur-3xl" />
-          <div
-            className="absolute bottom-0 right-0 h-72 w-72 animate-pulse rounded-full bg-orange-500/25 mix-blend-screen blur-3xl"
-            style={{ animationDelay: "0.8s" }}
+      <PageHeader
+        eyebrow="ANALYTICS"
+        title="Growth Lens"
+        subtitle="AI detects dark billing patterns, duplicate charges, and escalating ₹1 traps in your transactions."
+        accentHex={ACCENT}
+        rightSlot={
+          <HeroKpiTile
+            label="Patterns detected"
+            value={String(totalDetected)}
+            caption={totalLost ? `${inr(totalLost)} lost to rupee traps` : "Monitoring your transactions"}
+            accentHex={ACCENT}
+            loading={loading}
           />
-        </div>
+        }
+      />
 
-        <div className="relative z-10">
-          <div className="mb-6 flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-            <div className="flex flex-1 items-start gap-3 sm:gap-4">
-              <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-red-500 to-orange-600 shadow-2xl shadow-red-500/45">
-                <Shield className="h-8 w-8 text-white" strokeWidth={2.4} />
-              </div>
-              <div className="min-w-0">
-                <h1 className="mb-1 text-2xl font-bold tracking-tight text-white sm:text-3xl">Dark Pattern Detector</h1>
-                <p className="text-sm leading-relaxed text-white/75">
-                  AI-assisted view of billing tricks, duplicate charges, and rupee-trap escalation.
-                </p>
-              </div>
+      {/* Action strip */}
+      <div className="flex flex-wrap items-center justify-between gap-4">
+            <div className="inline-flex items-center gap-2 rounded-xl border-2 border-green-500/45 bg-green-500/15 px-3 py-2">
+              <Zap className="h-5 w-5 shrink-0 text-green-400" />
+              <span className="text-sm font-bold text-green-300">Live analysis</span>
             </div>
-            <div className="flex shrink-0 flex-col items-stretch gap-3 sm:flex-row sm:items-center lg:flex-col lg:items-end">
-              <div className="inline-flex items-center gap-2 self-start rounded-xl border-2 border-green-500/45 bg-green-500/15 px-3 py-2 sm:self-auto lg:self-end">
-                <Zap className="h-5 w-5 shrink-0 text-green-400" />
-                <span className="text-sm font-bold text-green-300">Live analysis</span>
-              </div>
-              <button
-                type="button"
-                onClick={onScan}
-                disabled={busy}
-                className="inline-flex items-center justify-center gap-2 rounded-xl bg-exiqo-purple px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-exiqo-purple/35 transition hover:bg-exiqo-purple/90 disabled:opacity-50"
-              >
-                <RefreshCw className={`h-4 w-4 ${busy ? "animate-spin" : ""}`} />
-                {busy ? "Scanning…" : "Run fresh scan"}
-              </button>
+            <button
+              type="button"
+              onClick={onScan}
+              disabled={busy}
+              className="inline-flex items-center justify-center gap-2 rounded-xl bg-exiqo-purple px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-exiqo-purple/35 transition hover:bg-exiqo-purple/90 disabled:opacity-50"
+            >
+              <RefreshCw className={`h-4 w-4 ${busy ? "animate-spin" : ""}`} />
+              {busy ? "Scanning…" : "Run fresh scan"}
+            </button>
+      </div>
+
+      <section className="rounded-3xl border border-cyan-500/25 bg-gradient-to-br from-cyan-500/10 to-exiqo-dark/60 p-5">
+        <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-bold text-white">Upcoming charge alerts</h2>
+            <p className="mt-1 max-w-2xl text-sm text-exiqo-glow/70">
+              Predicted from your real debits (trials, renewals, ₹1 verification follow-ups). Snooze, dismiss, or add a
+              calendar reminder before the charge date.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={runProactiveScan}
+              disabled={proactiveBusy || proactiveLoading}
+              className="inline-flex items-center gap-2 rounded-xl border border-cyan-400/40 bg-cyan-500/15 px-4 py-2 text-sm font-semibold text-cyan-100 transition hover:bg-cyan-500/25 disabled:opacity-50"
+            >
+              <Zap className="h-4 w-4" />
+              {proactiveBusy ? "Scanning…" : "Predict & refresh"}
+            </button>
+            <button
+              type="button"
+              onClick={loadProactive}
+              disabled={proactiveLoading}
+              className="rounded-xl border border-white/15 bg-white/[0.06] px-4 py-2 text-sm font-medium text-white/90 hover:bg-white/10 disabled:opacity-50"
+            >
+              Reload
+            </button>
+          </div>
+        </div>
+        {proactiveSavings?.savings?.this_month ? (
+          <div className="mb-4 grid gap-2 sm:grid-cols-3">
+            <div className="rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-sm">
+              <p className="text-exiqo-glow/55">Prevented (month)</p>
+              <p className="font-semibold text-emerald-300">
+                {inr(proactiveSavings.savings.this_month.amount_saved || 0)}
+              </p>
+            </div>
+            <div className="rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-sm">
+              <p className="text-exiqo-glow/55">Count (month)</p>
+              <p className="font-semibold text-white">{proactiveSavings.savings.this_month.patterns_prevented || 0}</p>
+            </div>
+            <div className="rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-sm">
+              <p className="text-exiqo-glow/55">All-time saved</p>
+              <p className="font-semibold text-cyan-200">
+                {inr(proactiveSavings.savings.all_time?.amount_saved || 0)}
+              </p>
             </div>
           </div>
+        ) : null}
+        {proactiveLoading ? (
+          <p className="text-sm text-exiqo-glow/60">Loading proactive alerts…</p>
+        ) : !proactive?.counts?.total ? (
+          <p className="text-sm text-exiqo-glow/65">
+            No upcoming alerts right now. Run <strong>Predict & refresh</strong> after migrations are applied, or when you
+            have new subscription-like debits.
+          </p>
+        ) : (
+          <div className="space-y-4">
+            {[
+              ["critical", "Act now", AlertTriangle, "border-red-500/40 bg-red-500/10"],
+              ["urgent", "Next 3 days", Clock, "border-orange-500/35 bg-orange-500/10"],
+              ["upcoming", "Later", Calendar, "border-emerald-500/30 bg-emerald-500/8"],
+            ].map(([key, label, Icon, shell]) => {
+              const list = proactive?.alerts?.[key] || [];
+              if (!list.length) return null;
+              return (
+                <div key={key} className={`rounded-2xl border p-4 ${shell}`}>
+                  <div className="mb-3 flex items-center gap-2">
+                    <Icon className="h-4 w-4 text-white/80" />
+                    <h3 className="text-sm font-bold uppercase tracking-wide text-white/90">{label}</h3>
+                    <span className="text-xs text-exiqo-glow/60">({list.length})</span>
+                  </div>
+                  <ul className="space-y-3">
+                    {list.map((a) => (
+                      <li
+                        key={a.id}
+                        className="flex flex-col gap-2 rounded-xl border border-white/10 bg-exiqo-dark/50 p-3 sm:flex-row sm:items-center sm:justify-between"
+                      >
+                        <div>
+                          <p className="font-semibold text-white">{a.merchant_name}</p>
+                          <p className="text-xs text-exiqo-glow/65">
+                            {(a.pattern_type || "").replaceAll("_", " ")} · {inr(a.charge_amount)} on{" "}
+                            {a.charge_date ? new Date(a.charge_date).toLocaleDateString("en-IN") : "—"} ·{" "}
+                            <span className="text-amber-200/90">{a.days_until_charge}d left</span>
+                          </p>
+                          {a.cancellation_url ? (
+                            <a
+                              href={a.cancellation_url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="mt-1 inline-flex items-center gap-1 text-xs font-medium text-cyan-300 hover:underline"
+                            >
+                              Open cancel page <ExternalLink className="h-3 w-3" />
+                            </a>
+                          ) : null}
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          {a.cancellation_url ? (
+                            <button
+                              type="button"
+                              disabled={proactiveBusy}
+                              onClick={() => window.open(a.cancellation_url, "_blank", "noopener,noreferrer")}
+                              className="rounded-lg border border-green-500/40 bg-green-500/15 px-3 py-1.5 text-xs font-semibold text-green-200 hover:bg-green-500/25 disabled:opacity-50"
+                            >
+                              Cancel now
+                            </button>
+                          ) : null}
+                          <button
+                            type="button"
+                            disabled={proactiveBusy}
+                            onClick={() => onDownloadIcs(a.id)}
+                            className="inline-flex items-center gap-1 rounded-lg border border-white/15 bg-white/[0.06] px-3 py-1.5 text-xs font-medium text-white/85 hover:bg-white/10 disabled:opacity-50"
+                          >
+                            <Calendar className="h-3.5 w-3.5" /> .ics
+                          </button>
+                          <button
+                            type="button"
+                            disabled={proactiveBusy}
+                            onClick={() => onProactiveSnooze(a.id)}
+                            className="rounded-lg border border-white/15 px-3 py-1.5 text-xs text-exiqo-glow/80 hover:bg-white/5 disabled:opacity-50"
+                          >
+                            Snooze 24h
+                          </button>
+                          <button
+                            type="button"
+                            disabled={proactiveBusy}
+                            onClick={() => onProactiveCancelled(a.id)}
+                            className="rounded-lg border border-emerald-500/35 bg-emerald-500/10 px-3 py-1.5 text-xs font-semibold text-emerald-200 disabled:opacity-50"
+                          >
+                            I cancelled
+                          </button>
+                          <button
+                            type="button"
+                            disabled={proactiveBusy}
+                            onClick={() => onProactiveDismiss(a.id)}
+                            className="rounded-lg px-3 py-1.5 text-xs text-exiqo-glow/50 hover:text-white/70 disabled:opacity-50"
+                          >
+                            Dismiss
+                          </button>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </section>
 
-          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
             {[
               {
                 label: "Threats found",
@@ -331,8 +585,6 @@ const DarkPatternDetector = ({ userId }) => {
                 </div>
               </div>
             ))}
-          </div>
-        </div>
       </div>
 
       {/* Timeline + detail */}

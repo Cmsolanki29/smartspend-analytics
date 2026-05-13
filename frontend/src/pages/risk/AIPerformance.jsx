@@ -137,7 +137,7 @@ function DriftGauge({ psi }) {
 // ── Main page ──────────────────────────────────────────────────────────────
 
 const AIPerformance = () => {
-  const { models: rawModels, drift: rawDrift, shadow: rawShadow, loading, error } = useModels();
+  const { models: rawModels, drift: rawDrift, shadow: rawShadow, loading } = useModels();
   const [modelStatus, setModelStatus] = React.useState(null);
   const [triggering, setTriggering] = React.useState(false);
   const [triggerMsg, setTriggerMsg] = React.useState(null);

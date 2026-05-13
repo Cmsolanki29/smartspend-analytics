@@ -18,6 +18,29 @@ router = APIRouter(prefix="/transactions", tags=["transactions"])
 
 # Register static sub-paths before `/{user_id}` so they are not captured as user ids.
 
+# UI filter chips → values persisted on `transactions.category` (see services/categorizer.py).
+_CATEGORY_FILTER_BUCKETS: dict[str, tuple[str, ...]] = {
+    "Food & Dining": ("Food & Dining",),
+    "Food": ("Food & Dining",),  # alias for older clients / bookmarks
+    "Entertainment": ("Entertainment",),
+    "Shopping": ("Shopping",),
+    "Travel": ("Transportation",),  # flights, ride-hail, metro, etc.
+    "Bills": ("Bills & Utilities",),
+    "Other": ("Healthcare", "Finance & Investment", "Transfer", "Others"),
+}
+
+
+def _category_filter_sql(category: str) -> tuple[str, list]:
+    """Build SQL fragment and bind values for category filter (bucket or exact match)."""
+    key = (category or "").strip()
+    if not key:
+        return "", []
+    if key in _CATEGORY_FILTER_BUCKETS:
+        vals = list(_CATEGORY_FILTER_BUCKETS[key])
+        placeholders = ", ".join(["%s"] * len(vals))
+        return f" AND category IN ({placeholders})", vals
+    return " AND category = %s", [key]
+
 
 def _row_to_tx(row) -> TransactionResponse:
     return TransactionResponse(
@@ -101,8 +124,9 @@ def list_transactions(
         elif month is not None or year is not None:
             raise HTTPException(400, "Provide both month and year, or neither.")
         if category:
-            q += " AND category = %s"
-            params.append(category)
+            frag, extra = _category_filter_sql(category)
+            q += frag
+            params.extend(extra)
         if anomaly_only:
             q += " AND anomaly_flag = TRUE"
         q += " ORDER BY transaction_date DESC, transaction_time DESC LIMIT %s"

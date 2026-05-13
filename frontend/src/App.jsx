@@ -1,11 +1,13 @@
 import React, { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import OnboardingPage from "./app/onboarding/page";
 import Dashboard from "./components/Dashboard/Dashboard";
+import { AuroraBackground } from "./components/intro/AuroraBackground";
 import FestivalPredictor from "./components/Festival/FestivalPredictor";
 import FraudShieldPage from "./components/FraudShield/FraudShieldPage";
 import PurchasePlanner from "./components/Purchase/PurchasePlanner";
 import DarkPatternDetector from "./components/DarkPatterns/DarkPatternDetector";
 import EMITrapDetector from "./components/EMI/EMITrapDetector";
+import FamilyEventsPage from "./components/FamilyEvents/FamilyEventsPage";
 import Sidebar from "./components/Layout/Sidebar";
 import TopBar from "./components/Layout/TopBar";
 import SubscriptionGraveyard from "./components/Subscriptions/SubscriptionGraveyard";
@@ -14,18 +16,12 @@ import { ToastProvider } from "./components/common/Toast";
 import { SkeletonCard } from "./components/common/SkeletonCard";
 import { useAuth } from "./context/AuthContext";
 import { getUsers } from "./services/api";
-// Phase 1-8 Risk Engine pages
-const TrustCenter = lazy(() => import("./pages/risk/TrustCenter"));
-const AIPerformance = lazy(() => import("./pages/risk/AIPerformance"));
-const AlertsCenter = lazy(() => import("./pages/risk/AlertsCenter"));
-const BehaviorProfile = lazy(() => import("./pages/risk/BehaviorProfile"));
-const DeviceTrust = lazy(() => import("./pages/risk/DeviceTrust"));
 
-// Phase 9-12 pages
-const InvestigationViewer = lazy(() => import("./pages/risk/InvestigationViewer"));
-const OrchestratorDashboard = lazy(() => import("./pages/risk/OrchestratorDashboard"));
-const DNNShadowReport = lazy(() => import("./pages/risk/DNNShadowReport"));
-const GNNTrainingPanel = lazy(() => import("./pages/risk/GNNTrainingPanel"));
+const TransactionsTab = lazy(() => import("./components/app-tabs/TransactionsTab"));
+const InsightsTab = lazy(() => import("./components/app-tabs/InsightsTab"));
+/** Legacy `activeTab === "simulator"` only (sidebar tab removed); renders Insights. */
+const SimulatorTab = lazy(() => import("./components/app-tabs/SimulatorTab"));
+const SettingsTab = lazy(() => import("./components/app-tabs/SettingsTab"));
 
 const App = () => {
   const { user, loading: authLoading, logout, isAuthenticated } = useAuth();
@@ -36,6 +32,33 @@ const App = () => {
   const [activeTab, setActiveTab] = useState("dashboard");
   const [loadingUsers, setLoadingUsers] = useState(true);
   const [userError, setUserError] = useState("");
+  /** After sign-in, show cinematic intro once per tab session before OTP / bank onboarding. */
+  const [preOnboardIntroDone, setPreOnboardIntroDone] = useState(false);
+
+  /** Legacy sidebar tab ids → unified FraudShield hub + URL sub-tab. */
+  useEffect(() => {
+    const map = {
+      "trust-center": "overview",
+      "ai-performance": "overview",
+      "alerts-center": "alerts",
+      "behavior-profile": "behavior",
+      "device-trust": "devices",
+      investigations: "investigations",
+      orchestrator: "overview",
+      "dnn-shadow": "overview",
+      "gnn-training": "overview",
+    };
+    const fraudTab = map[activeTab];
+    if (!fraudTab) return;
+    try {
+      const url = new URL(window.location.href);
+      url.searchParams.set("fraudTab", fraudTab);
+      window.history.replaceState({}, "", url.toString());
+    } catch {
+      /* ignore */
+    }
+    setActiveTab("fraud");
+  }, [activeTab]);
 
   const today = useMemo(() => new Date(), []);
   const [month, setMonth] = useState(today.getMonth() + 1);
@@ -50,6 +73,20 @@ const App = () => {
     document.documentElement.classList.toggle("light", !darkMode);
     document.body.classList.toggle("light", !darkMode);
   }, [darkMode]);
+
+  useEffect(() => {
+    if (!user?.id || user.onboarding_completed === true) {
+      setPreOnboardIntroDone(false);
+      return;
+    }
+    try {
+      setPreOnboardIntroDone(
+        window.sessionStorage.getItem(`ss_pre_onboard_intro_done_${user.id}`) === "1"
+      );
+    } catch {
+      setPreOnboardIntroDone(false);
+    }
+  }, [user?.id, user?.onboarding_completed]);
 
   useEffect(() => {
     if (!isAuthenticated || !user) {
@@ -106,6 +143,26 @@ const App = () => {
     );
   }
 
+  if (user && user.onboarding_completed !== true && !preOnboardIntroDone) {
+    return (
+      <ToastProvider>
+        <IntroFlow
+          variant="preOnboarding"
+          onComplete={() => {
+            try {
+              if (user?.id) {
+                window.sessionStorage.setItem(`ss_pre_onboard_intro_done_${user.id}`, "1");
+              }
+            } catch {
+              /* ignore */
+            }
+            setPreOnboardIntroDone(true);
+          }}
+        />
+      </ToastProvider>
+    );
+  }
+
   if (user && user.onboarding_completed !== true) {
     return (
       <ToastProvider>
@@ -116,17 +173,8 @@ const App = () => {
 
   return (
     <ToastProvider>
-      <div className="relative min-h-screen overflow-hidden bg-exiqo-navy">
-        <div className="pointer-events-none absolute inset-0 overflow-hidden">
-          <div
-            className="exiqo-bg-orb absolute -right-20 -top-20 h-[600px] w-[600px] rounded-full bg-exiqo-purple/8 blur-[140px]"
-            style={{ animation: "exiqo-orb-pulse 8s ease-in-out infinite" }}
-          />
-          <div
-            className="exiqo-bg-orb absolute -bottom-20 -left-20 h-[500px] w-[500px] rounded-full bg-exiqo-pink/6 blur-[120px]"
-            style={{ animation: "exiqo-orb-pulse 8s ease-in-out infinite 1s" }}
-          />
-        </div>
+      <div className="relative min-h-screen overflow-hidden bg-[#070418]">
+        <AuroraBackground variant="app" />
 
         <Sidebar
           collapsed={sidebarCollapsed}
@@ -137,18 +185,19 @@ const App = () => {
         />
 
         <div
-          style={{ marginLeft: sidebarCollapsed ? 84 : 280 }}
-          className="relative z-10 min-h-screen transition-all duration-300"
+          style={{ marginLeft: sidebarCollapsed ? 80 : 256 }}
+          className="relative z-10 min-h-screen transition-all duration-500 ease-brand max-md:!ml-0"
         >
           <TopBar
             userName={selectedUser?.name || user?.name || user?.email || "User"}
+            userId={selectedUserId}
             month={month}
             year={year}
             onMonthChange={setMonth}
             onYearChange={setYear}
           />
 
-          <div className="p-5 lg:p-7">
+          <div className="p-4 pb-28 pt-4 sm:p-5 md:pb-7 lg:p-7">
             {loadingUsers ? (
               <div style={{ marginTop: 4 }}>
                 <SkeletonCard lines={4} height={88} />
@@ -161,7 +210,8 @@ const App = () => {
                 </button>
               </div>
             ) : (
-              <div key={activeTab} className="tab-panel-enter">
+              <>
+                <div key={activeTab} className="tab-panel-enter">
                 {activeTab === "dashboard" && (
                   <Dashboard
                     userId={selectedUserId}
@@ -169,12 +219,29 @@ const App = () => {
                     year={year}
                     onMonthChange={setMonth}
                     onYearChange={setYear}
-                    onOpenFraudShield={() => setActiveTab("fraud")}
-                    onOpenFestival={() => setActiveTab("festival")}
-                    onOpenPurchase={() => setActiveTab("purchase")}
                     userName={selectedUser?.name}
                     setActiveTab={setActiveTab}
                   />
+                )}
+                {activeTab === "transactions" && (
+                  <Suspense fallback={<SkeletonCard lines={4} height={88} />}>
+                    <TransactionsTab userId={selectedUserId} month={month} year={year} />
+                  </Suspense>
+                )}
+                {activeTab === "insights" && (
+                  <Suspense fallback={<SkeletonCard lines={4} height={88} />}>
+                    <InsightsTab userId={selectedUserId} month={month} year={year} />
+                  </Suspense>
+                )}
+                {activeTab === "simulator" && (
+                  <Suspense fallback={<SkeletonCard lines={4} height={88} />}>
+                    <SimulatorTab userId={selectedUserId} month={month} year={year} />
+                  </Suspense>
+                )}
+                {activeTab === "settings" && (
+                  <Suspense fallback={<SkeletonCard lines={2} height={72} />}>
+                    <SettingsTab />
+                  </Suspense>
                 )}
                 {activeTab === "emi" && <EMITrapDetector userId={selectedUserId} />}
                 {activeTab === "subscriptions" && <SubscriptionGraveyard userId={selectedUserId} />}
@@ -184,56 +251,10 @@ const App = () => {
                 )}
                 {activeTab === "purchase" && <PurchasePlanner userId={selectedUserId} />}
                 {activeTab === "festival" && <FestivalPredictor userId={selectedUserId} />}
+                {activeTab === "family-events" && <FamilyEventsPage userId={selectedUserId} />}
 
-                {/* Phase 1-8 Risk Engine */}
-                {activeTab === "trust-center" && (
-                  <Suspense fallback={<SkeletonCard lines={4} height={88} />}>
-                    <TrustCenter userId={selectedUserId} />
-                  </Suspense>
-                )}
-                {activeTab === "ai-performance" && (
-                  <Suspense fallback={<SkeletonCard lines={4} height={88} />}>
-                    <AIPerformance userId={selectedUserId} />
-                  </Suspense>
-                )}
-                {activeTab === "alerts-center" && (
-                  <Suspense fallback={<SkeletonCard lines={4} height={88} />}>
-                    <AlertsCenter userId={selectedUserId} />
-                  </Suspense>
-                )}
-                {activeTab === "behavior-profile" && (
-                  <Suspense fallback={<SkeletonCard lines={4} height={88} />}>
-                    <BehaviorProfile userId={selectedUserId} />
-                  </Suspense>
-                )}
-                {activeTab === "device-trust" && (
-                  <Suspense fallback={<SkeletonCard lines={4} height={88} />}>
-                    <DeviceTrust userId={selectedUserId} />
-                  </Suspense>
-                )}
-
-                {/* Phase 9-12 AI Phases */}
-                {activeTab === "investigations" && (
-                  <Suspense fallback={<SkeletonCard lines={4} height={88} />}>
-                    <InvestigationViewer userId={selectedUserId} />
-                  </Suspense>
-                )}
-                {activeTab === "orchestrator" && (
-                  <Suspense fallback={<SkeletonCard lines={4} height={88} />}>
-                    <OrchestratorDashboard userId={selectedUserId} />
-                  </Suspense>
-                )}
-                {activeTab === "dnn-shadow" && (
-                  <Suspense fallback={<SkeletonCard lines={4} height={88} />}>
-                    <DNNShadowReport userId={selectedUserId} />
-                  </Suspense>
-                )}
-                {activeTab === "gnn-training" && (
-                  <Suspense fallback={<SkeletonCard lines={4} height={88} />}>
-                    <GNNTrainingPanel userId={selectedUserId} />
-                  </Suspense>
-                )}
-              </div>
+                </div>
+              </>
             )}
           </div>
         </div>

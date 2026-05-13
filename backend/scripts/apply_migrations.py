@@ -29,9 +29,15 @@ from pathlib import Path
 from typing import Iterable
 
 import psycopg2
+from dotenv import load_dotenv
 from psycopg2.extensions import connection as PgConnection
 
 logger = logging.getLogger(__name__)
+
+_BACKEND_DIR = Path(__file__).resolve().parent.parent
+# Project root .env (same pattern as backend/db.py) then optional backend/.env
+load_dotenv(_BACKEND_DIR.parent / ".env")
+load_dotenv(_BACKEND_DIR / ".env")
 
 
 _MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "database" / "migrations"

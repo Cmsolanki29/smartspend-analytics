@@ -74,7 +74,8 @@ export default function SignInPage({ onSwitchToSignup }: SignInPageProps) {
           <input
             id="si-email"
             className={inputClass}
-            type="email"
+            type="text"
+            inputMode="email"
             placeholder="john@example.com"
             autoComplete="email"
             value={email}

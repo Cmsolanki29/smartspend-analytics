@@ -6,8 +6,9 @@
 
 import React, { useEffect, useRef, useState } from "react";
 import * as d3 from "d3";
+import { getApiBaseUrl } from "../../../services/apiBaseUrl";
 
-const API_BASE = process.env.REACT_APP_API_URL || "http://localhost:8001/api";
+const API_BASE = getApiBaseUrl();
 
 function nodeColor(score) {
   if (score >= 0.7) return "#ef4444";

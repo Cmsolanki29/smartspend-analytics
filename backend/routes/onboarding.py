@@ -103,7 +103,7 @@ async def link_bank(
         # Check OTP FIRST before any DB writes
         cur.execute(
             """
-            SELECT verified, expires_at
+            SELECT verified, (expires_at < NOW()) AS is_expired
             FROM otp_verifications
             WHERE mobile_number = %s
             ORDER BY created_at DESC
@@ -114,14 +114,11 @@ async def link_bank(
         otp_row = cur.fetchone()
         if not otp_row:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Send OTP first")
-        otp_verified, otp_expires_at = otp_row[0], otp_row[1]
+        otp_verified, otp_expired = otp_row[0], otp_row[1]
         if not otp_verified:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="OTP not verified")
-        if otp_expires_at is not None:
-            cur.execute("SELECT NOW() > %s", (otp_expires_at,))
-            is_expired = bool(cur.fetchone()[0])
-            if is_expired:
-                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="OTP expired")
+        if otp_expired:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="OTP expired")
 
         # Check for duplicate before inserting
         cur.execute(
@@ -148,11 +145,16 @@ async def link_bank(
         cur.execute(
             """
             UPDATE users
-            SET mobile_number = %s
+            SET mobile_number = %s,
+                phone = %s,
+                is_verified = TRUE
             WHERE id = %s
             """,
-            (mobile_number, user_id),
+            (mobile_number, mobile_number, user_id),
         )
+
+        cur.execute("SELECT COUNT(*) FROM transactions WHERE user_id = %s", (user_id,))
+        existing_user_txns = int(cur.fetchone()[0])
 
         cur.execute(
             """
@@ -162,11 +164,16 @@ async def link_bank(
         )
         available_count = int(cur.fetchone()[0])
 
-        transactions_to_assign = random.randint(600, 800)
-        if available_count <= 0:
+        # Signup seeds 1000+ demo txns; only pull from the shared pool if this user still needs more.
+        if existing_user_txns >= 1000:
             transactions_to_assign = 0
-        elif transactions_to_assign > available_count:
-            transactions_to_assign = available_count
+        else:
+            need = max(0, 1000 - existing_user_txns)
+            transactions_to_assign = min(need, random.randint(600, 800))
+            if available_count <= 0:
+                transactions_to_assign = 0
+            elif transactions_to_assign > available_count:
+                transactions_to_assign = available_count
 
         if transactions_to_assign > 0:
             cur.execute(
