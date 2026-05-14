@@ -11,10 +11,10 @@ import {
   LogOut,
   Menu,
   Receipt,
-  Settings,
   Shield,
   ShoppingBag,
   Sparkles,
+  Upload,
   X,
   Zap,
 } from "lucide-react";
@@ -45,7 +45,10 @@ const NAV_SECTIONS = [
   {
     id: "financial",
     label: "Financial OS",
-    items: [{ id: "emi", label: "EMI Tracker", icon: Activity }],
+    items: [
+      { id: "emi", label: "EMI Tracker", icon: Activity },
+      { id: "settings", label: "Upload Statements", icon: Upload },
+    ],
   },
   {
     id: "planning",
@@ -55,11 +58,6 @@ const NAV_SECTIONS = [
       { id: "purchase", label: "Purchase Planner", icon: ShoppingBag },
       { id: "family-events", label: "Trips & Events", icon: CalendarDays },
     ],
-  },
-  {
-    id: "system",
-    label: "System",
-    items: [{ id: "settings", label: "Settings", icon: Settings }],
   },
 ];
 
