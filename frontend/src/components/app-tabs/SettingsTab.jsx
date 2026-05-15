@@ -1,58 +1,88 @@
-import React from "react";
-import { Lock, Settings } from "lucide-react";
+import React, { useState } from "react";
+import { ArrowLeft, Lock, Settings } from "lucide-react";
 import { GlassCard } from "../intro/GlassCard";
+import UploadStatement from "../Upload/UploadStatement";
+import ConnectedAccountsSettings from "../Settings/ConnectedAccountsSettings";
 
-export default function SettingsTab({ onOpenAdmin }) {
+export default function SettingsTab({ onOpenAdmin, userId, onLeave }) {
+  const [panel, setPanel] = useState("accounts"); // accounts | upload
+  const [uploadSourceType, setUploadSourceType] = useState("credit_card");
+
   return (
-    <GlassCard padding="lg" className="mx-auto mt-4 max-w-lg border border-violet-500/20">
-      <div className="flex items-start gap-4">
-        {/* Icon */}
-        <div className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-violet-500/15 border border-violet-500/25">
-          <Settings className="h-5 w-5 text-violet-400" aria-hidden />
+    <div className="mx-auto max-w-3xl space-y-6 pb-10">
+      {typeof onLeave === "function" ? (
+        <div className="flex items-center gap-2 border-b border-white/10 pb-3 md:hidden">
+          <button
+            type="button"
+            onClick={() => onLeave()}
+            className="inline-flex items-center gap-2 rounded-xl border border-white/15 bg-white/[0.06] px-3 py-2 text-sm font-semibold text-white/90 hover:bg-white/[0.1]"
+          >
+            <ArrowLeft className="h-4 w-4 shrink-0" aria-hidden />
+            Back to dashboard
+          </button>
         </div>
+      ) : null}
 
-        <div className="min-w-0 flex-1">
-          {/* Heading — white for strong hierarchy */}
-          <h2 className="font-heading text-lg font-semibold text-white">
-            Settings
-          </h2>
+      <div className="flex max-md:flex-col gap-2 rounded-xl border border-white/10 bg-white/[0.04] p-1">
+        <button
+          type="button"
+          onClick={() => setPanel("accounts")}
+          className={`flex-1 rounded-lg py-2.5 text-sm font-semibold transition ${
+            panel === "accounts" ? "bg-violet-600 text-white" : "text-white/50 hover:text-white/80"
+          }`}
+        >
+          Connected accounts
+        </button>
+        <button
+          type="button"
+          onClick={() => setPanel("upload")}
+          className={`flex-1 rounded-lg py-2.5 text-sm font-semibold transition ${
+            panel === "upload" ? "bg-violet-600 text-white" : "text-white/50 hover:text-white/80"
+          }`}
+        >
+          Uploads &amp; history
+        </button>
+      </div>
 
-          {/* Body text — slate-300 for WCAG AA contrast on dark background */}
-          <p className="mt-2 text-sm leading-relaxed text-slate-300">
-            Account preferences, data export, and notifications will land here.
-            Use the{" "}
-            <span className="font-medium text-violet-400">month switcher</span>
-            {" "}in the top bar for now.
-          </p>
+      {userId ? (
+        panel === "accounts" ? (
+          <ConnectedAccountsSettings
+            userId={userId}
+            onGoUpload={(kind) => {
+              setUploadSourceType(kind || "credit_card");
+              setPanel("upload");
+            }}
+          />
+        ) : (
+          <UploadStatement userId={userId} initialSourceType={uploadSourceType} />
+        )
+      ) : (
+        <GlassCard padding="lg" className="border-dashed border-white/15">
+          <p className="text-sm text-white/50">Select a user to manage connected accounts.</p>
+        </GlassCard>
+      )}
 
-          {/* COMING SOON badge — visible with purple tint */}
-          <span className="mt-3 inline-flex items-center rounded-full border border-violet-500/40 bg-violet-500/15 px-3 py-1 text-[11px] font-bold uppercase tracking-widest text-violet-300">
-            Coming Soon
-          </span>
-
-          {/* Internal tools section */}
-          {typeof onOpenAdmin === "function" && (
-            <div className="mt-6 border-t border-white/10 pt-5">
-              <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                Internal Tools
-              </p>
-              <p className="mt-2 text-sm leading-relaxed text-slate-300">
-                ML ops consoles (AI performance, GNN, DNN shadow, orchestrator) are
-                not listed in the workspace sidebar. Unlock with your{" "}
-                <span className="font-medium text-violet-400">admin passphrase</span>.
+      {typeof onOpenAdmin === "function" ? (
+        <GlassCard padding="lg" className="border-dashed border-white/15">
+          <div className="flex items-start gap-3">
+            <Settings className="mt-0.5 h-6 w-6 text-exiqo-glow shrink-0" aria-hidden />
+            <div className="min-w-0 flex-1">
+              <h2 className="font-heading text-lg font-semibold text-white">Engine diagnostics</h2>
+              <p className="mt-2 text-sm text-exiqo-glow/70">
+                ML ops consoles are not listed in the workspace sidebar. Unlock with your admin passphrase.
               </p>
               <button
                 type="button"
                 onClick={() => onOpenAdmin()}
-                className="mt-4 inline-flex items-center gap-2 rounded-xl border border-violet-500/40 bg-violet-500/15 px-4 py-2.5 text-sm font-semibold text-violet-100 shadow-[0_0_20px_-8px_rgba(124,58,237,0.4)] transition-all duration-200 hover:bg-violet-500/25 hover:border-violet-400/60 hover:shadow-[0_0_28px_-6px_rgba(124,58,237,0.55)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/50"
+                className="mt-3 inline-flex items-center gap-2 rounded-xl border border-violet-500/40 bg-violet-500/15 px-4 py-2.5 text-sm font-semibold text-violet-100 transition hover:bg-violet-500/25 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/40"
               >
                 <Lock className="h-4 w-4 shrink-0" aria-hidden />
                 Unlock engine diagnostics
               </button>
             </div>
-          )}
-        </div>
-      </div>
-    </GlassCard>
+          </div>
+        </GlassCard>
+      ) : null}
+    </div>
   );
 }

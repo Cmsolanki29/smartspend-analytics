@@ -18,6 +18,7 @@ from models.auth_schemas import (
     UserSignIn,
     UserSignUp,
 )
+from services.dashboard_scope import normalize_dashboard_mode
 from utils.auth import (
     ACCESS_TOKEN_EXPIRE_MINUTES,
     check_login_rate_limit,
@@ -146,6 +147,37 @@ def signup(
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Registration failed")
         user_id = int(row[0])
 
+        sc = (user.signup_connection or "add_later").strip().lower()
+        if sc == "link_bank":
+            pb = (user.primary_bank or "").strip()[:50]
+            inst = (user.primary_bank or "").strip()[:100]
+            if not inst.lower().endswith("bank") and not inst.lower().endswith("card"):
+                inst = (inst + " — Linked").strip()[:100]
+            cur.execute(
+                "UPDATE users SET bank = %s, dashboard_mode = 'bank_only' WHERE id = %s",
+                (pb, user_id),
+            )
+            cur.execute(
+                """
+                INSERT INTO connected_sources (
+                  user_id, source_type, institution_name, account_number_masked,
+                  is_primary, is_visible_on_dashboard, added_via, status
+                )
+                VALUES (%s, 'bank', %s, 'Linked', TRUE, TRUE, 'signup', 'active')
+                ON CONFLICT ON CONSTRAINT connected_sources_user_inst_type_key DO UPDATE
+                  SET status = 'active',
+                      is_primary = TRUE,
+                      is_visible_on_dashboard = TRUE,
+                      added_via = 'signup'
+                """,
+                (user_id, inst),
+            )
+        else:
+            cur.execute(
+                "UPDATE users SET dashboard_mode = 'merged' WHERE id = %s",
+                (user_id,),
+            )
+
         access = create_access_token(user_id=user_id, email=str(user.email))
         refresh = create_refresh_token(user_id=user_id)
         client_host = request.client.host if request.client else None
@@ -244,7 +276,8 @@ def get_me(user_id: int = Depends(get_current_user_id), conn: PgConnection = Dep
         cur.execute(
             """
             SELECT id, name, email, monthly_income::float,
-                   COALESCE(onboarding_completed, FALSE), created_at
+                   COALESCE(onboarding_completed, FALSE), created_at,
+                   bank, COALESCE(dashboard_mode, 'merged')
             FROM users WHERE id = %s
             """,
             (user_id,),
@@ -259,6 +292,8 @@ def get_me(user_id: int = Depends(get_current_user_id), conn: PgConnection = Dep
             monthly_income=float(row[3]),
             onboarding_completed=bool(row[4]),
             created_at=row[5],
+            bank=row[6],
+            dashboard_mode=normalize_dashboard_mode(str(row[7] or "merged")),
         )
     finally:
         cur.close()

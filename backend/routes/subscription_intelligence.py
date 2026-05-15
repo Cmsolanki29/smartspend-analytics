@@ -378,7 +378,7 @@ def get_subscription_savings(
             """,
             (user_id,),
         )
-        this_month = cur.fetchone()
+        this_month = cur.fetchone() or (0, 0, 0, 0)
         cur.execute(
             """
             SELECT COALESCE(SUM(subscriptions_cancelled), 0), COALESCE(SUM(amount_saved), 0),
@@ -388,7 +388,7 @@ def get_subscription_savings(
             """,
             (user_id,),
         )
-        ytd = cur.fetchone()
+        ytd = cur.fetchone() or (0, 0, 0)
         cur.execute(
             """
             SELECT COALESCE(SUM(subscriptions_cancelled), 0), COALESCE(SUM(amount_saved), 0)
@@ -397,7 +397,7 @@ def get_subscription_savings(
             """,
             (user_id,),
         )
-        all_time = cur.fetchone()
+        all_time = cur.fetchone() or (0, 0)
     except Exception:
         this_month = (0, 0, 0, 0)
         ytd = (0, 0, 0)

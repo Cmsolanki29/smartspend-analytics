@@ -1,4 +1,5 @@
 """SmartSpend Analytics API — Phase 2 FastAPI application."""
+# reload-bump: source-badge-v3
 
 from __future__ import annotations
 
@@ -58,6 +59,8 @@ from routes import (
     anomaly,
     auth,
     dark_patterns,
+    dashboard,
+    documents,
     emi_affordability_check,
     emi_detector,
     festival_important_days,
@@ -114,8 +117,24 @@ async def lifespan(app: FastAPI):
         except Exception as exc:  # noqa: BLE001
             print(f"Startup ML/DB step warning: {exc}")
 
-    asyncio.create_task(_warm_ml_models())
     print("SmartSpend Backend Ready (ML training running in background).")
+
+    import sys
+
+    try:
+        import pdfplumber as _pp
+
+        print(
+            f"[documents] pdfplumber OK (v{getattr(_pp, '__version__', '?')}) — PDF statement extraction enabled."
+        )
+    except Exception as _pdf_exc:  # noqa: BLE001
+        print(
+            f"[documents] WARNING: pdfplumber not usable ({type(_pdf_exc).__name__}: {_pdf_exc}). "
+            f"Install into the SAME Python that runs uvicorn:\n"
+            f"  {sys.executable} -m pip install pdfplumber"
+        )
+
+    asyncio.create_task(_warm_ml_models())
 
     # ── Phase 1-8 startup ──────────────────────────────────────────────────
     if _RISK_ENGINE_OK:
@@ -230,6 +249,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 app.include_router(ai_chat.router, prefix="/api")
 app.include_router(auth.router, prefix="/api")
+app.include_router(dashboard.router, prefix="/api")
 app.include_router(onboarding.router, prefix="/api")
 app.include_router(otp.router, prefix="/api")
 app.include_router(transactions.router, prefix="/api")
@@ -248,6 +268,7 @@ app.include_router(festival_predictor.router, prefix="/api")
 app.include_router(purchase_planner.router, prefix="/api")
 app.include_router(financial_state.router, prefix="/api")
 app.include_router(pattern_alerts.router, prefix="/api")
+app.include_router(documents.router, prefix="/api")
 
 # ── Phase 1-8 routers ──────────────────────────────────────────────────────
 if _RISK_ENGINE_OK:
@@ -370,12 +391,27 @@ def ml_status() -> dict[str, Any]:
 
 @app.get("/health")
 def health() -> dict[str, Any]:
+    import sys
+
     ok = test_db_connection()
+    pdf: dict[str, Any] = {"ok": False, "version": None, "error": None}
+    try:
+        import pdfplumber as _pp_health
+
+        pdf = {
+            "ok": True,
+            "version": getattr(_pp_health, "__version__", None),
+            "error": None,
+        }
+    except Exception as exc:  # noqa: BLE001
+        pdf = {"ok": False, "version": None, "error": f"{type(exc).__name__}: {exc}"}
     return {
         "status": "healthy" if ok else "degraded",
         "db": "connected" if ok else "disconnected",
         "ml": "ready",
         "version": "2.0.0",
+        "python_executable": sys.executable,
+        "pdfplumber": pdf,
     }
 
 

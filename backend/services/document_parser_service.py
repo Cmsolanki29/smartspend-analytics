@@ -10,13 +10,14 @@ import io
 import json
 from typing import Any
 
-try:
-    import pdfplumber
-    _PDF_AVAILABLE = True
-except ImportError:
-    _PDF_AVAILABLE = False
-
 from services.ai_llm_provider import get_chat_client, get_chat_model, preferred_provider
+
+
+def _pdfplumber():
+    """Import at use-time so installs apply without restarting all workers."""
+    import pdfplumber
+
+    return pdfplumber
 
 
 def extract_text_from_bytes(content: bytes, filename: str) -> str:
@@ -24,8 +25,10 @@ def extract_text_from_bytes(content: bytes, filename: str) -> str:
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
 
     if ext == "pdf":
-        if not _PDF_AVAILABLE:
-            return f"[PDF: {filename} — pdfplumber not installed. pip install pdfplumber]"
+        try:
+            pdfplumber = _pdfplumber()
+        except Exception as exc:
+            return f"[PDF: {filename} — could not load pdfplumber ({type(exc).__name__}: {exc}). pip install pdfplumber]"
         try:
             with pdfplumber.open(io.BytesIO(content)) as pdf:
                 pages_text = []
@@ -68,8 +71,19 @@ def classify_and_extract(text: str) -> dict[str, Any]:
             "transactions": [],
         }
 
-    client = get_chat_client()
+    # Use a 90s timeout — document extraction can be slow with gpt-4o-mini on busy keys.
+    # Prefer Groq (fast, free tier) as first attempt; fall back to OpenAI on failure.
+    client = get_chat_client(timeout=90.0)
     model = get_chat_model()
+
+    # If Groq key is available and we're on OpenAI, swap to Groq for speed.
+    if preferred_provider() == "openai":
+        from services.ai_llm_provider import _env_val as _ev, _groq_key as _gk
+        _gk_val = _gk()
+        if _gk_val:
+            from openai import OpenAI as _OAI
+            client = _OAI(api_key=_gk_val, base_url="https://api.groq.com/openai/v1", timeout=60.0)
+            model = _ev("GROQ_CHAT_MODEL", "llama-3.3-70b-versatile") or "llama-3.3-70b-versatile"
 
     prompt = f"""You are a financial document classifier for Indian banks.
 

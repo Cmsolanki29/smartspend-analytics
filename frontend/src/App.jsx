@@ -25,7 +25,7 @@
  * ════════════════════════════════════════════════════════════════════
  */
 import React, { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useState } from "react";
-import OnboardingPage from "./app/onboarding/page";
+import SourceSelection from "./pages/Onboarding/SourceSelection";
 import Dashboard from "./components/Dashboard/Dashboard";
 import { AuroraBackground } from "./components/intro/AuroraBackground";
 import FestivalPredictor from "./components/Festival/FestivalPredictor";
@@ -55,7 +55,20 @@ const SettingsTab = lazy(() => import("./components/app-tabs/SettingsTab"));
 const AdminDiagnostics = lazy(() => import("./pages/admin/AdminDiagnostics"));
 
 const App = () => {
-  const { user, loading: authLoading, logout, isAuthenticated } = useAuth();
+  const { user, loading: authLoading, logout, isAuthenticated, reloadUser } = useAuth();
+
+  // Set by IntroAuth after a successful SIGNUP (never after sign-in).
+  const [needsSourceSelection, setNeedsSourceSelection] = useState(false);
+
+  // Read the sessionStorage flag once isAuthenticated flips true (signup sets it after auth resolves).
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    try {
+      if (window.sessionStorage.getItem("ss_source_selection") === "1") {
+        setNeedsSourceSelection(true);
+      }
+    } catch { /* ignore */ }
+  }, [isAuthenticated]);
   const [users, setUsers] = useState([]);
   const [selectedUserId, setSelectedUserId] = useState(1);
   /** Logged-in user only — subscription intelligence + device-link must match JWT (no workspace fallback). */
@@ -206,7 +219,18 @@ const App = () => {
     );
   }
 
-  if (user && user.onboarding_completed !== true && !preOnboardIntroDone) {
+  // Fresh signup: skip cinematic pre-onboard intro → go straight to source selection.
+  const skipPreOnboardIntro =
+    needsSourceSelection ||
+    (() => {
+      try {
+        return window.sessionStorage.getItem("ss_source_selection") === "1";
+      } catch {
+        return false;
+      }
+    })();
+
+  if (user && user.onboarding_completed !== true && !preOnboardIntroDone && !skipPreOnboardIntro) {
     return (
       <ToastProvider>
         <IntroFlow
@@ -226,10 +250,22 @@ const App = () => {
     );
   }
 
+  // All incomplete onboarding → Source Selection (replaces old OTP/bank onboarding page).
   if (user && user.onboarding_completed !== true) {
     return (
       <ToastProvider>
-        <OnboardingPage />
+        <SourceSelection
+          userId={user.id}
+          onComplete={async () => {
+            await reloadUser();
+            try {
+              window.sessionStorage.removeItem("ss_source_selection");
+            } catch {
+              /* ignore */
+            }
+            setNeedsSourceSelection(false);
+          }}
+        />
       </ToastProvider>
     );
   }
@@ -315,7 +351,11 @@ const App = () => {
                 )}
                 {activeTab === "settings" && (
                   <Suspense fallback={<SkeletonCard lines={2} height={72} />}>
-                    <SettingsTab onOpenAdmin={() => setActiveTab("admin")} />
+                    <SettingsTab
+                      onOpenAdmin={() => setActiveTab("admin")}
+                      userId={selectedUserId}
+                      onLeave={() => setActiveTab("dashboard")}
+                    />
                   </Suspense>
                 )}
                 {activeTab === "admin" && (

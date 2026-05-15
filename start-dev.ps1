@@ -30,7 +30,7 @@ if ($pythonZombies -and $pythonZombies.Count -gt 0) {
 }
 
 # ── 3. Kill anything on ports 8001 and 3000 ───────────────────────────────────
-foreach ($port in @(8001, 3000)) {
+foreach ($port in @(8765, 3000)) {
     $pids = (netstat -ano 2>$null | Select-String ":$port\s") |
         ForEach-Object { ($_ -split "\s+")[-1] } |
         Where-Object { $_ -match "^\d+$" } |
@@ -64,7 +64,7 @@ Start-Sleep -Seconds 15
 $backendOk = $false
 for ($i = 0; $i -lt 3; $i++) {
     try {
-        $r = (Invoke-WebRequest "http://127.0.0.1:8001/health" -TimeoutSec 5 -UseBasicParsing).StatusCode
+        $r = (Invoke-WebRequest "http://127.0.0.1:8765/health" -TimeoutSec 5 -UseBasicParsing).StatusCode
         if ($r -eq 200) { $backendOk = $true; break }
     } catch { }
     Start-Sleep -Seconds 5
@@ -84,7 +84,7 @@ Start-Process powershell -WorkingDirectory $root -ArgumentList @(
 
 Write-Host ""
 Write-Host "╔═════════════════════════════════════════╗" -ForegroundColor Green
-Write-Host "║  Backend:  http://127.0.0.1:8001        ║" -ForegroundColor Green
+Write-Host "║  Backend:  http://127.0.0.1:8765        ║" -ForegroundColor Green
 Write-Host "║  Frontend: http://localhost:3000         ║" -ForegroundColor Green
 Write-Host "║  Wait ~30s for frontend compilation     ║" -ForegroundColor Green
 Write-Host "╚═════════════════════════════════════════╝" -ForegroundColor Green

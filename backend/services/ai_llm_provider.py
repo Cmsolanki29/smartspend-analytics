@@ -49,13 +49,13 @@ def preferred_provider() -> str:
     return "none"
 
 
-def get_chat_client() -> OpenAI:
+def get_chat_client(timeout: float = 90.0) -> OpenAI:
     """Primary chat client — always creates fresh (never caches a client with empty key)."""
     prov = preferred_provider()
     if prov == "openai":
-        return OpenAI(api_key=_openai_key(), timeout=30.0)
+        return OpenAI(api_key=_openai_key(), timeout=timeout)
     if prov == "groq":
-        return OpenAI(api_key=_groq_key(), base_url="https://api.groq.com/openai/v1", timeout=30.0)
+        return OpenAI(api_key=_groq_key(), base_url="https://api.groq.com/openai/v1", timeout=timeout)
     raise RuntimeError("No LLM API key configured")
 
 
@@ -66,14 +66,14 @@ def get_chat_model() -> str:
     return _env_val("GROQ_CHAT_MODEL", "llama-3.3-70b-versatile") or "llama-3.3-70b-versatile"
 
 
-def get_fallback_chat_client_and_model() -> tuple[OpenAI | None, str | None]:
+def get_fallback_chat_client_and_model(timeout: float = 90.0) -> tuple[OpenAI | None, str | None]:
     """If OpenAI is primary, return (Groq client, model); else (OpenAI client, model); else (None, None)."""
     if preferred_provider() == "openai" and _groq_key():
         m = _env_val("GROQ_CHAT_MODEL", "llama-3.3-70b-versatile") or "llama-3.3-70b-versatile"
-        return OpenAI(api_key=_groq_key(), base_url="https://api.groq.com/openai/v1", timeout=30.0), m
+        return OpenAI(api_key=_groq_key(), base_url="https://api.groq.com/openai/v1", timeout=timeout), m
     if preferred_provider() == "groq" and _openai_key():
         m = _env_val("OPENAI_CHAT_MODEL", "gpt-4o-mini") or "gpt-4o-mini"
-        return OpenAI(api_key=_openai_key(), timeout=30.0), m
+        return OpenAI(api_key=_openai_key(), timeout=timeout), m
     return None, None
 
 

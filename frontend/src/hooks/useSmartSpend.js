@@ -101,6 +101,13 @@ export const useSmartSpend = (userId, month, year) => {
     load();
   }, [load]);
 
+  // Re-fetch immediately whenever the user changes their dashboard mode from Settings.
+  useEffect(() => {
+    const handler = () => load();
+    window.addEventListener("dashboardModeChanged", handler);
+    return () => window.removeEventListener("dashboardModeChanged", handler);
+  }, [load]);
+
   return {
     ...data,
     loading,

@@ -28,12 +28,16 @@ export type AuthUser = {
   email?: string | null;
   monthly_income?: number;
   onboarding_completed?: boolean;
+  bank?: string | null;
+  dashboard_mode?: string;
 } | null;
 
 export type SignupPayload = {
   name: string;
   email: string;
   password: string;
+  signup_connection?: "link_bank" | "add_later";
+  primary_bank?: string;
 };
 
 type LoadMeOptions = {

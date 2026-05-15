@@ -209,17 +209,24 @@ CREATE TABLE emis (
 -- PURCHASE GOALS  (backend-compatible column names)
 -- ─────────────────────────────────────────────────────────────
 CREATE TABLE purchase_goals (
-  id               SERIAL PRIMARY KEY,
-  user_id          INTEGER       NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  item_name        VARCHAR(200)  NOT NULL,
-  target_amount    NUMERIC(12,2) NOT NULL,
-  saved_amount     NUMERIC(12,2) DEFAULT 0,
-  target_date      DATE          NOT NULL,
-  monthly_target   NUMERIC(12,2) DEFAULT 0,
-  category         VARCHAR(50)   DEFAULT 'OTHER',
-  priority         VARCHAR(10)   DEFAULT 'MEDIUM',
-  status           VARCHAR(20)   DEFAULT 'SAVING',
-  created_at       TIMESTAMP     DEFAULT NOW()
+  id                       SERIAL PRIMARY KEY,
+  user_id                  INTEGER       NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  item_name                VARCHAR(200)  NOT NULL,
+  target_amount            NUMERIC(12,2) NOT NULL,
+  saved_amount             NUMERIC(12,2) DEFAULT 0,
+  target_date              DATE          NOT NULL,
+  monthly_target           NUMERIC(12,2) DEFAULT 0,
+  category                 VARCHAR(50)   DEFAULT 'OTHER',
+  priority                 VARCHAR(10)   DEFAULT 'MEDIUM',
+  status                   VARCHAR(20)   DEFAULT 'SAVING',
+  best_buy_month           VARCHAR(200),
+  emi_vs_cash              JSONB,
+  sacrifice_plan           JSONB,
+  original_target_date     DATE,
+  linked_festival_key      VARCHAR(50),
+  display_timeline_label   VARCHAR(80),
+  linked_family_event_id INTEGER,
+  created_at               TIMESTAMP     DEFAULT NOW()
 );
 CREATE INDEX idx_pg_user_status ON purchase_goals(user_id, status);
 

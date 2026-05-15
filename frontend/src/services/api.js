@@ -4,7 +4,7 @@ import { getApiBaseUrl } from "./apiBaseUrl";
 /** Long-running AI insight bundle (parallel Groq/OpenAI calls). */
 export const INSIGHTS_FETCH_MS = 42000;
 
-/** Dev: `/api` → CRA proxy → backend :8001. Prod: `REACT_APP_API_URL` or localhost default. */
+/** Dev: `/api` → CRA proxy → backend (see `frontend/package.json` `"proxy"`, default port 8765). Prod: `REACT_APP_API_URL` or localhost default. */
 const BASE_URL = getApiBaseUrl();
 
 export const TOKEN_ACCESS_KEY = "smartspend_access_token";
@@ -103,7 +103,17 @@ api.interceptors.response.use(
 const authDetail = (error) => {
   const d = error.response?.data?.detail;
   if (typeof d === "string") return d;
-  if (Array.isArray(d)) return d.map((x) => x.msg || JSON.stringify(x)).join("; ");
+  if (Array.isArray(d)) {
+    return d
+      .map((x) => {
+        if (x && typeof x === "object" && "msg" in x) {
+          const loc = Array.isArray(x.loc) ? x.loc.filter(Boolean).join(".") : "";
+          return loc ? `${loc}: ${x.msg}` : x.msg;
+        }
+        return typeof x === "string" ? x : JSON.stringify(x);
+      })
+      .join("; ");
+  }
   if (d && typeof d === "object") return JSON.stringify(d);
   // Axios: no response = browser could not connect (backend down, wrong host/port, or CORS blocked).
   if (!error.response) {
@@ -113,15 +123,15 @@ const authDetail = (error) => {
       return (
         `Request timed out before the API responded (${BASE_URL}). ` +
         `If the backend just started, wait ~30s (first DB + ML warmup) and refresh. ` +
-        `Otherwise start it: .\\start-backend.ps1 (port 8001) and open http://127.0.0.1:8001/health`
+        `Otherwise start it: .\\start-backend.ps1 (default port 8765) and open http://127.0.0.1:8765/health`
       );
     }
     if (msg === "Network Error" || code === "ERR_NETWORK") {
       return (
         `Cannot reach the API (${BASE_URL}). ` +
-        `Start the backend: .\\start-backend.ps1 (default port 8001). ` +
-        `Open http://127.0.0.1:8001/health or /docs. ` +
-        `In development the app calls /api through the CRA proxy to port 8001 — ensure the API is listening there.`
+        `Start the backend: .\\start-backend.ps1 (default port 8765). ` +
+        `Open http://127.0.0.1:8765/health or /docs. ` +
+        `In development the app calls /api through the CRA proxy — ensure the API is listening on the same port as package.json "proxy".`
       );
     }
   }
@@ -151,6 +161,68 @@ export async function authSignup(body) {
 export async function authGetMe() {
   try {
     const { data } = await api.get("/auth/me", { timeout: 20000 });
+    return data;
+  } catch (e) {
+    throw new Error(authDetail(e));
+  }
+}
+
+/** Positive integer for API paths / bodies (avoids NaN → JSON null → 422). */
+function apiUserId(userId) {
+  const n = typeof userId === "number" && Number.isFinite(userId) ? userId : Number(userId);
+  if (!Number.isFinite(n) || n < 1 || !Number.isInteger(n)) {
+    throw new Error("Select a valid user profile (user id missing). Refresh the page.");
+  }
+  return n;
+}
+
+function apiSourceId(sourceId) {
+  const n = typeof sourceId === "number" && Number.isFinite(sourceId) ? sourceId : Number(sourceId);
+  if (!Number.isFinite(n) || n < 1 || !Number.isInteger(n)) {
+    throw new Error("Invalid account id. Reload Connected accounts and try again.");
+  }
+  return n;
+}
+
+/** Connected financial sources + dashboard scope */
+export async function getConnectedSources(userId) {
+  try {
+    const { data } = await api.get("/sources/connected", {
+      params: { user_id: apiUserId(userId) },
+      timeout: 20000,
+    });
+    return data;
+  } catch (e) {
+    throw new Error(authDetail(e));
+  }
+}
+
+export async function updateDashboardMode({ userId, mode, visibleSourceIds }) {
+  try {
+    const uid = apiUserId(userId);
+    const ids = (visibleSourceIds || [])
+      .map((id) => Number(id))
+      .filter((n) => Number.isFinite(n) && Number.isInteger(n) && n > 0);
+    const payload = {
+      user_id: uid,
+      mode,
+      visible_source_ids: ids,
+    };
+    // JSON body only (duplicate query+body confused some proxies); allow slow DB during dev ML warmup.
+    const { data } = await api.post("/user/update-dashboard-mode", payload, { timeout: 60000 });
+    return data;
+  } catch (e) {
+    throw new Error(authDetail(e));
+  }
+}
+
+export async function toggleSourceVisibility({ userId, sourceId, visible }) {
+  try {
+    const uid = apiUserId(userId);
+    const sid = apiSourceId(sourceId);
+    const vis = Boolean(visible);
+    const payload = { user_id: uid, source_id: sid, visible: vis };
+    const { data } = await api.post("/sources/toggle-visibility", payload, { timeout: 60000 });
     return data;
   } catch (e) {
     throw new Error(authDetail(e));

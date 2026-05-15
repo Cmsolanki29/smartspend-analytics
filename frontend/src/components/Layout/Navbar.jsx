@@ -46,6 +46,7 @@ const Navbar = ({
     { id: "fraud", label: "Fraud Shield", icon: "🛡️" },
     { id: "purchase", label: "Purchase Planner", icon: "🛵" },
     { id: "festival", label: "Festival Planner", icon: "🪔" },
+    { id: "settings", label: "Settings", icon: "⚙️" },
   ];
 
   return (

@@ -10,6 +10,14 @@ export default function TransactionsTab({ userId, month, year }) {
   const [summary, setSummary] = useState(null);
   const [anomalies, setAnomalies] = useState(null);
   const [loading, setLoading] = useState(true);
+  // Bumped when dashboardModeChanged fires — causes useEffect below to re-run.
+  const [modeVersion, setModeVersion] = useState(0);
+
+  useEffect(() => {
+    const handler = () => setModeVersion((v) => v + 1);
+    window.addEventListener("dashboardModeChanged", handler);
+    return () => window.removeEventListener("dashboardModeChanged", handler);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -24,7 +32,8 @@ export default function TransactionsTab({ userId, month, year }) {
       setLoading(false);
     });
     return () => { cancelled = true; };
-  }, [userId, month, year]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId, month, year, modeVersion]);
 
   const count = summary?.transaction_count ?? summary?.total_count ?? summary?.count ?? 0;
   const anomCount =

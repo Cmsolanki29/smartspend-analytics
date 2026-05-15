@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from db import get_db
 from models.schemas import MonthlyTrend, SpendingAnalysis
+from services.dashboard_scope import fetch_dashboard_mode, transaction_scope_sql
 from services.scorer import calculate_health_score
 
 router = APIRouter(prefix="/analysis", tags=["analysis"])
@@ -29,14 +30,35 @@ def _trends_rows_need_transaction_fallback(trends: list[MonthlyTrend]) -> bool:
     return all(_z(t.income) and _z(t.expense) for t in trends)
 
 
+def _needs_scoped_transaction_trends(cur, user_id: int) -> bool:
+    """Use live scoped txn aggregation when summary is empty/stale or dashboard is filtered."""
+    mode = fetch_dashboard_mode(cur, user_id)
+    if mode != "merged":
+        return True
+    cur.execute(
+        """
+        SELECT EXISTS (
+          SELECT 1 FROM connected_sources cs
+          WHERE cs.user_id = %s AND COALESCE(cs.is_visible_on_dashboard, TRUE) = FALSE
+        )
+        """,
+        (user_id,),
+    )
+    if cur.fetchone()[0]:
+        return True
+    return False
+
+
 def _monthly_trends_from_transactions(cur, user_id: int) -> list[MonthlyTrend]:
     """
     Last 12 calendar months ending at CURRENT_DATE (user-wide; not scoped to dashboard M/Y).
     Income = CREDIT, expense = DEBIT; saved = max(0, income - expense).
     health_score / anomaly_count from monthly_summary for that month when present, else 0.
     """
+    mode = fetch_dashboard_mode(cur, user_id)
+    scope = transaction_scope_sql("t", mode)
     cur.execute(
-        """
+        f"""
         WITH bounds AS (
             SELECT
                 (date_trunc('month', CURRENT_DATE::timestamp) - interval '11 months')::date AS start_m,
@@ -58,6 +80,7 @@ def _monthly_trends_from_transactions(cur, user_id: int) -> list[MonthlyTrend]:
                 COALESCE(SUM(CASE WHEN t.type = 'DEBIT' THEN t.amount ELSE 0 END), 0)::float AS expense
             FROM transactions t
             WHERE t.user_id = %s
+              AND ({scope})
               AND t.transaction_date >= (SELECT start_m FROM bounds)
               AND t.transaction_date < ((SELECT end_m FROM bounds) + interval '1 month')
             GROUP BY EXTRACT(YEAR FROM t.transaction_date), EXTRACT(MONTH FROM t.transaction_date)
@@ -108,24 +131,28 @@ def spending_by_category(
 ):
     cur = conn.cursor()
     try:
+        mode = fetch_dashboard_mode(cur, user_id)
+        scope = transaction_scope_sql("tr", mode)
         pm, py = (month - 1, year) if month > 1 else (12, year - 1)
         cur.execute(
-            """
+            f"""
             WITH cur AS (
-                SELECT COALESCE(category, 'Uncategorized') AS category,
-                       SUM(amount)::float AS total, COUNT(*)::int AS cnt
-                FROM transactions
-                WHERE user_id = %s AND type = 'DEBIT'
-                  AND EXTRACT(MONTH FROM transaction_date)::int = %s
-                  AND EXTRACT(YEAR FROM transaction_date)::int = %s
+                SELECT COALESCE(tr.category, 'Uncategorized') AS category,
+                       SUM(tr.amount)::float AS total, COUNT(*)::int AS cnt
+                FROM transactions tr
+                WHERE tr.user_id = %s AND tr.type = 'DEBIT'
+                  AND ({scope})
+                  AND EXTRACT(MONTH FROM tr.transaction_date)::int = %s
+                  AND EXTRACT(YEAR FROM tr.transaction_date)::int = %s
                 GROUP BY 1
             ),
             prev AS (
-                SELECT COALESCE(category, 'Uncategorized') AS category, SUM(amount)::float AS total
-                FROM transactions
-                WHERE user_id = %s AND type = 'DEBIT'
-                  AND EXTRACT(MONTH FROM transaction_date)::int = %s
-                  AND EXTRACT(YEAR FROM transaction_date)::int = %s
+                SELECT COALESCE(tr.category, 'Uncategorized') AS category, SUM(tr.amount)::float AS total
+                FROM transactions tr
+                WHERE tr.user_id = %s AND tr.type = 'DEBIT'
+                  AND ({scope})
+                  AND EXTRACT(MONTH FROM tr.transaction_date)::int = %s
+                  AND EXTRACT(YEAR FROM tr.transaction_date)::int = %s
                 GROUP BY 1
             )
             SELECT cur.category, cur.total, cur.cnt, COALESCE(prev.total, 0)::float
@@ -201,7 +228,7 @@ def monthly_trends(user_id: int, conn=Depends(get_db)):
                 )
             )
         summary_series = list(reversed(out))
-        if _trends_rows_need_transaction_fallback(summary_series):
+        if _trends_rows_need_transaction_fallback(summary_series) or _needs_scoped_transaction_trends(cur, user_id):
             return _monthly_trends_from_transactions(cur, user_id)
         return summary_series
     except Exception as e:
@@ -222,14 +249,17 @@ def top_merchants(
     y = year or today.year
     cur = conn.cursor()
     try:
+        mode = fetch_dashboard_mode(cur, user_id)
+        scope = transaction_scope_sql("tr", mode)
         cur.execute(
-            """
-            SELECT merchant, SUM(amount)::float AS s
-            FROM transactions
-            WHERE user_id = %s AND type = 'DEBIT'
-              AND EXTRACT(MONTH FROM transaction_date)::int = %s
-              AND EXTRACT(YEAR FROM transaction_date)::int = %s
-              AND merchant IS NOT NULL AND merchant <> ''
+            f"""
+            SELECT merchant, SUM(tr.amount)::float AS s
+            FROM transactions tr
+            WHERE tr.user_id = %s AND tr.type = 'DEBIT'
+              AND ({scope})
+              AND EXTRACT(MONTH FROM tr.transaction_date)::int = %s
+              AND EXTRACT(YEAR FROM tr.transaction_date)::int = %s
+              AND tr.merchant IS NOT NULL AND tr.merchant <> ''
             GROUP BY merchant
             ORDER BY s DESC
             LIMIT 10;
@@ -254,14 +284,17 @@ def simulate_scenario(
     try:
         today = date.today()
         m, y = today.month, today.year
+        mode = fetch_dashboard_mode(cur, user_id)
+        scope = transaction_scope_sql("tr", mode)
         cur.execute(
-            """
-            SELECT COALESCE(SUM(CASE WHEN type = 'CREDIT' THEN amount ELSE 0 END), 0)::float,
-                   COALESCE(SUM(CASE WHEN type = 'DEBIT' THEN amount ELSE 0 END), 0)::float
-            FROM transactions
-            WHERE user_id = %s
-              AND EXTRACT(MONTH FROM transaction_date)::int = %s
-              AND EXTRACT(YEAR FROM transaction_date)::int = %s;
+            f"""
+            SELECT COALESCE(SUM(CASE WHEN tr.type = 'CREDIT' THEN tr.amount ELSE 0 END), 0)::float,
+                   COALESCE(SUM(CASE WHEN tr.type = 'DEBIT' THEN tr.amount ELSE 0 END), 0)::float
+            FROM transactions tr
+            WHERE tr.user_id = %s
+              AND ({scope})
+              AND EXTRACT(MONTH FROM tr.transaction_date)::int = %s
+              AND EXTRACT(YEAR FROM tr.transaction_date)::int = %s;
             """,
             (user_id, m, y),
         )

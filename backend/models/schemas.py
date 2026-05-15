@@ -32,6 +32,9 @@ class TransactionResponse(BaseModel):
     risk_score: int
     risk_level: str
     anomaly_reason: Optional[str] = None
+    # Source info — populated by list_transactions (NULL for seed/demo rows)
+    source_name: Optional[str] = None
+    source_type: Optional[str] = None
 
 
 class SpendingAnalysis(BaseModel):

@@ -20,6 +20,14 @@ const TransactionTable = ({ userId, month, year, presentation = "default" }) => 
   const [category, setCategory] = useState("All");
   const [sortBy, setSortBy] = useState("date");
   const [page, setPage] = useState(1);
+  // Bumped whenever dashboard mode changes so transactions re-fetch with new scope.
+  const [modeVersion, setModeVersion] = useState(0);
+
+  useEffect(() => {
+    const handler = () => setModeVersion((v) => v + 1);
+    window.addEventListener("dashboardModeChanged", handler);
+    return () => window.removeEventListener("dashboardModeChanged", handler);
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -40,7 +48,8 @@ const TransactionTable = ({ userId, month, year, presentation = "default" }) => 
     } finally {
       setLoading(false);
     }
-  }, [userId, month, year, category]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId, month, year, category, modeVersion]);
 
   useEffect(() => {
     load();
@@ -120,7 +129,7 @@ const TransactionTable = ({ userId, month, year, presentation = "default" }) => 
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           placeholder="Search by merchant..."
-          className="min-h-[48px] w-full rounded-xl border border-white/10 bg-white/[0.04] px-4 py-2.5 text-sm text-white placeholder:text-gray-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60 lg:max-w-xs"
+          className="min-h-[48px] w-full rounded-xl border border-white/10 bg-white/[0.04] px-4 py-2.5 text-sm text-white placeholder:text-exiqo-glow/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60 lg:max-w-xs"
         />
 
         <div className="filter-row flex flex-wrap gap-2">
@@ -137,7 +146,7 @@ const TransactionTable = ({ userId, month, year, presentation = "default" }) => 
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          <span className="text-xs font-medium uppercase tracking-wide text-gray-500">Sort by</span>
+          <span className="text-xs font-medium uppercase tracking-wide text-exiqo-glow/55">Sort by</span>
           <select
             aria-label="Sort transactions"
             value={sortBy}
@@ -153,14 +162,14 @@ const TransactionTable = ({ userId, month, year, presentation = "default" }) => 
 
       {loading ? (
         <div>
-          <p className="mb-2 text-xs text-gray-400">Loading transactions…</p>
+          <p className="mb-2 text-xs text-exiqo-glow/60">Loading transactions…</p>
           <SkeletonCard lines={6} height={200} />
         </div>
       ) : error ? (
         <ErrorCard message={error} onRetry={load} />
       ) : pagedRows.length === 0 ? (
         <EmptyState
-          icon={<FileText className="mx-auto h-12 w-12 text-gray-500" aria-hidden />}
+          icon={<FileText className="mx-auto h-12 w-12 text-exiqo-glow/50" aria-hidden />}
           title="No transactions match"
           subtitle="Try widening filters or pick another month."
         />
@@ -170,25 +179,14 @@ const TransactionTable = ({ userId, month, year, presentation = "default" }) => 
             <table className="w-full min-w-[640px] border-collapse text-left text-sm">
               <caption className="sr-only">Transactions for selected month</caption>
               <thead className="sticky top-0 z-10 border-b border-white/[0.08] bg-exiqo-navy">
-                <tr className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">
-                  <th scope="col" className="px-3 py-3">
-                    Date
-                  </th>
-                  <th scope="col" className="px-3 py-3">
-                    Merchant
-                  </th>
-                  <th scope="col" className="px-3 py-3">
-                    Category
-                  </th>
-                  <th scope="col" className="px-3 py-3">
-                    Amount
-                  </th>
-                  <th scope="col" className="px-3 py-3">
-                    Method
-                  </th>
-                  <th scope="col" className="px-3 py-3">
-                    Risk
-                  </th>
+                <tr className="text-[11px] font-semibold uppercase tracking-wide text-exiqo-glow/60">
+                  <th scope="col" className="px-3 py-3">Date</th>
+                  <th scope="col" className="px-3 py-3">Merchant</th>
+                  <th scope="col" className="px-3 py-3">Category</th>
+                  <th scope="col" className="px-3 py-3">Amount</th>
+                  <th scope="col" className="px-3 py-3">Source</th>
+                  <th scope="col" className="px-3 py-3">Method</th>
+                  <th scope="col" className="px-3 py-3">Risk</th>
                 </tr>
               </thead>
               <tbody>
@@ -199,9 +197,9 @@ const TransactionTable = ({ userId, month, year, presentation = "default" }) => 
                       idx % 2 === 1 ? "bg-white/[0.02]" : ""
                     } ${String(tx.risk_level || "LOW").toLowerCase()}`}
                   >
-                    <td className="whitespace-nowrap px-3 py-2.5 text-gray-300 tabular-nums">{String(tx.transaction_date)}</td>
+                    <td className="whitespace-nowrap px-3 py-2.5 text-exiqo-glow/80 tabular-nums">{String(tx.transaction_date)}</td>
                     <td className="max-w-[12rem] truncate px-3 py-2.5 text-white">{tx.merchant || "—"}</td>
-                    <td className="px-3 py-2.5 text-gray-400">{tx.category || "Uncategorized"}</td>
+                    <td className="px-3 py-2.5 text-exiqo-glow/75">{tx.category || "Uncategorized"}</td>
                     <td
                       className={`px-3 py-2.5 font-heading font-semibold tabular-nums ${
                         tx.type === "CREDIT" ? "text-emerald-300" : "text-white"
@@ -209,13 +207,30 @@ const TransactionTable = ({ userId, month, year, presentation = "default" }) => 
                     >
                       {apiUtils.formatINR(tx.amount)}
                     </td>
-                    <td className="px-3 py-2.5 text-gray-400">{tx.payment_method || "—"}</td>
+                    <td className="whitespace-nowrap px-3 py-2.5">
+                      {tx.source_type === "credit_card" ? (
+                        <span className="inline-flex items-center gap-1 rounded-full border border-violet-500/30 bg-violet-500/10 px-2 py-0.5 text-[10px] font-semibold text-violet-300">
+                          💳 {tx.source_name || "Card"}
+                        </span>
+                      ) : tx.source_type === "bank_statement_pdf" ? (
+                        <span className="inline-flex items-center gap-1 rounded-full border border-cyan-500/30 bg-cyan-500/10 px-2 py-0.5 text-[10px] font-semibold text-cyan-300">
+                          🏦 {tx.source_name || "Bank"}
+                        </span>
+                      ) : tx.source_type ? (
+                        <span className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/[0.04] px-2 py-0.5 text-[10px] text-white/50">
+                          🏦 {tx.source_name || tx.source_type}
+                        </span>
+                      ) : (
+                        <span className="text-[10px] text-white/30">Bank</span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2.5 text-exiqo-glow/70">{tx.payment_method || "—"}</td>
                     <td className="px-3 py-2.5">
                       <span className="inline-flex items-center gap-1.5">
                         {tx.anomaly_flag ? (
                           <span className="h-full w-0.5 rounded-full bg-gradient-to-b from-rose-400 to-rose-600" aria-hidden />
                         ) : null}
-                        <span className="text-xs font-medium text-gray-300">
+                        <span className="text-xs font-medium text-exiqo-glow/85">
                           {tx.anomaly_flag ? `${tx.risk_level} · anomaly` : "Normal"}
                         </span>
                       </span>
@@ -235,7 +250,7 @@ const TransactionTable = ({ userId, month, year, presentation = "default" }) => 
             >
               Prev
             </button>
-            <span className="px-2 text-xs text-gray-400 tabular-nums">
+            <span className="px-2 text-xs text-exiqo-glow/60 tabular-nums">
               Page {page} / {pageCount}
             </span>
             <button

@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 
 from db import get_db
 from models.schemas import TransactionResponse
+from services.dashboard_scope import fetch_dashboard_mode, transaction_scope_sql
 from services.ml_model import ml_detector
 from services.categorizer import categorize_merchant
 
@@ -39,16 +40,17 @@ _CATEGORY_FILTER_BUCKETS: dict[str, tuple[str, ...]] = {
 }
 
 
-def _category_filter_sql(category: str) -> tuple[str, list]:
+def _category_filter_sql(category: str, alias: str = "t") -> tuple[str, list]:
     """Build SQL fragment and bind values for category filter (bucket or exact match)."""
     key = (category or "").strip()
     if not key:
         return "", []
+    col = f"{alias}.category"
     if key in _CATEGORY_FILTER_BUCKETS:
         vals = list(_CATEGORY_FILTER_BUCKETS[key])
         placeholders = ", ".join(["%s"] * len(vals))
-        return f" AND category IN ({placeholders})", vals
-    return " AND category = %s", [key]
+        return f" AND {col} IN ({placeholders})", vals
+    return f" AND {col} = %s", [key]
 
 
 def _row_to_tx(row) -> TransactionResponse:
@@ -70,6 +72,28 @@ def _row_to_tx(row) -> TransactionResponse:
     )
 
 
+def _row_to_tx_with_source(row) -> TransactionResponse:
+    """Like _row_to_tx but also reads source_name (col 14) and source_type (col 15)."""
+    return TransactionResponse(
+        id=row[0],
+        user_id=row[1],
+        transaction_date=row[2],
+        transaction_time=row[3],
+        amount=float(row[4]),
+        type=row[5],
+        description=row[6],
+        merchant=row[7],
+        category=row[8],
+        payment_method=row[9],
+        anomaly_flag=bool(row[10]),
+        risk_score=int(row[11] or 0),
+        risk_level=row[12] or "LOW",
+        anomaly_reason=row[13],
+        source_name=row[14] if len(row) > 14 else None,
+        source_type=row[15] if len(row) > 15 else None,
+    )
+
+
 @router.get("/{user_id}/summary")
 def transaction_month_summary(
     user_id: int,
@@ -86,8 +110,10 @@ def transaction_month_summary(
     cur = None
     try:
         cur = conn.cursor()
+        mode = fetch_dashboard_mode(cur, user_id)
+        scope = transaction_scope_sql("transactions", mode)
         cur.execute(
-            """
+            f"""
             SELECT
                 COALESCE(SUM(CASE WHEN type = 'CREDIT' THEN amount ELSE 0 END), 0)::float,
                 COALESCE(SUM(CASE WHEN type = 'DEBIT' THEN amount ELSE 0 END), 0)::float,
@@ -96,7 +122,8 @@ def transaction_month_summary(
             FROM transactions
             WHERE user_id = %s
               AND EXTRACT(MONTH FROM transaction_date)::int = %s
-              AND EXTRACT(YEAR FROM transaction_date)::int = %s;
+              AND EXTRACT(YEAR FROM transaction_date)::int = %s
+              AND ({scope});
             """,
             (user_id, m, y),
         )
@@ -141,7 +168,7 @@ def transaction_month_summary(
             cur.close()
 
 
-@router.get("/{user_id}", response_model=list[TransactionResponse])
+@router.get("/{user_id}")
 def list_transactions(
     user_id: int,
     month: Optional[int] = Query(None, ge=1, le=12),
@@ -151,31 +178,51 @@ def list_transactions(
     limit: int = Query(50, ge=1, le=200),
     conn=Depends(get_db),
 ):
+    """Transaction list — mode-aware, includes source_name/source_type for badges."""
     cur = None
     try:
         cur = conn.cursor()
-        q = """
-            SELECT id, user_id, transaction_date, transaction_time, amount, type, description,
-                   merchant, category, payment_method, anomaly_flag, risk_score, risk_level, anomaly_reason
-            FROM transactions WHERE user_id = %s
+        mode = fetch_dashboard_mode(cur, user_id)
+        scope = transaction_scope_sql("t", mode)
+        q = f"""
+            SELECT t.id, t.user_id, t.transaction_date, t.transaction_time, t.amount, t.type,
+                   t.description, t.merchant, t.category, t.payment_method, t.anomaly_flag,
+                   t.risk_score, t.risk_level, t.anomaly_reason,
+                   src.institution_name AS source_name,
+                   src.source_type      AS source_type
+            FROM transactions t
+            LEFT JOIN connected_sources src
+                   ON src.id = t.connected_source_id AND src.user_id = t.user_id
+            WHERE t.user_id = %s AND ({scope})
         """
         params: list = [user_id]
         if month is not None and year is not None:
-            q += " AND EXTRACT(MONTH FROM transaction_date)::int = %s AND EXTRACT(YEAR FROM transaction_date)::int = %s"
+            q += " AND EXTRACT(MONTH FROM t.transaction_date)::int = %s AND EXTRACT(YEAR FROM t.transaction_date)::int = %s"
             params.extend([month, year])
         elif month is not None or year is not None:
             raise HTTPException(400, "Provide both month and year, or neither.")
         if category:
-            frag, extra = _category_filter_sql(category)
+            frag, extra = _category_filter_sql(category, alias="t")
             q += frag
             params.extend(extra)
         if anomaly_only:
-            q += " AND anomaly_flag = TRUE"
-        q += " ORDER BY transaction_date DESC, transaction_time DESC LIMIT %s"
+            q += " AND t.anomaly_flag = TRUE"
+        q += " ORDER BY t.transaction_date DESC, t.transaction_time DESC LIMIT %s"
         params.append(limit)
         cur.execute(q, params)
+        cols = [d[0] for d in cur.description]
         rows = cur.fetchall()
-        return [_row_to_tx(r) for r in rows]
+        result = []
+        for row in rows:
+            d = dict(zip(cols, row))
+            d["transaction_date"] = str(d["transaction_date"])
+            d["transaction_time"] = str(d["transaction_time"])
+            d["anomaly_flag"] = bool(d.get("anomaly_flag"))
+            d["risk_score"] = int(d.get("risk_score") or 0)
+            d["risk_level"] = d.get("risk_level") or "LOW"
+            d["amount"] = float(d.get("amount") or 0)
+            result.append(d)
+        return result
     except HTTPException:
         raise
     except Exception as e:
