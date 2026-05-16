@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from db import get_db
+from services.dashboard_scope import fetch_dashboard_mode, transaction_scope_sql
 from services.openai_service import call_gpt
 
 router = APIRouter(prefix="/emi", tags=["EMI Tracker"])
@@ -49,18 +50,94 @@ MERCHANT_FINANCE_HINTS = (
 )
 
 
-def _infer_monthly_income(cur, user_id: int) -> float:
-    """When users.monthly_income is missing, estimate from recent salary-like credits."""
+def _emi_group_key(merchant: str, description: str, amount: float) -> str:
+    """Split same-merchant rows when narration or amount clearly indicates separate EMIs."""
+    m = (merchant or "").strip()
+    d = (description or "").strip().lower()
+    if any(k in d for k in ("emi", "loan", "installment", "nach", "ecs", "auto debit", "repayment")):
+        return f"{m}|{d[:80]}"
+    return f"{m}|{round(float(amount or 0))}"
+
+
+def _source_label(institution: str, source_type: str) -> str:
+    inst = (institution or "").strip() or "Unknown source"
+    st = (source_type or "").strip().lower()
+    if st == "credit_card":
+        return f"{inst} (Credit Card)"
+    if st in ("bank", "bank_statement_pdf"):
+        return f"{inst} (Bank)"
+    if st:
+        return f"{inst} ({st.replace('_', ' ')})"
+    return inst
+
+
+def _append_card_statement_burden(
+    cur,
+    user_id: int,
+    mode: str,
+    emi_entries: list[dict[str, Any]],
+) -> None:
+    """When card sources are in scope, surface monthly card spend as a debt line item."""
+    if mode not in ("credit_card_only", "merged"):
+        return
+    scope = transaction_scope_sql("t", mode)
     cur.execute(
-        """
+        f"""
+        SELECT cs.institution_name, cs.source_type,
+               COALESCE(SUM(t.amount), 0)::float AS month_spend
+        FROM transactions t
+        JOIN connected_sources cs ON cs.id = t.connected_source_id AND cs.user_id = t.user_id
+        WHERE t.user_id = %s
+          AND t.type = 'DEBIT'
+          AND cs.source_type = 'credit_card'
+          AND t.transaction_date >= DATE_TRUNC('month', CURRENT_DATE)
+          AND ({scope})
+        GROUP BY cs.id, cs.institution_name, cs.source_type
+        HAVING COALESCE(SUM(t.amount), 0) >= 1000
+        ORDER BY month_spend DESC;
+        """,
+        (user_id,),
+    )
+    existing_sources = {e.get("source_name", "").lower() for e in emi_entries}
+    for institution, source_type, month_spend in cur.fetchall():
+        label = _source_label(institution, source_type)
+        if label.lower() in existing_sources:
+            continue
+        spend = float(month_spend or 0)
+        if spend < 1000:
+            continue
+        emi_entries.append(
+            {
+                "merchant": f"{institution} — card spend (this month)",
+                "amount": round(spend, 2),
+                "payment_date": 1,
+                "category": "credit_card",
+                "emi_type": "CREDIT CARD",
+                "months_detected": 1,
+                "first_detected": date.today().replace(day=1).isoformat(),
+                "last_detected": date.today().isoformat(),
+                "next_due": _next_due_date(1, date.today()).isoformat(),
+                "source_name": label,
+                "source_type": source_type or "credit_card",
+                "is_statement_burden": True,
+            }
+        )
+
+
+def _infer_monthly_income(cur, user_id: int, mode: str = "merged") -> float:
+    """When users.monthly_income is missing, estimate from recent salary-like credits."""
+    scope = transaction_scope_sql("t", mode)
+    cur.execute(
+        f"""
         SELECT COALESCE(MAX(month_total), 0)::float
         FROM (
-            SELECT SUM(amount) AS month_total
-            FROM transactions
-            WHERE user_id = %s
-              AND type = 'CREDIT'
-              AND transaction_date >= (CURRENT_DATE - INTERVAL '9 months')
-            GROUP BY DATE_TRUNC('month', transaction_date)
+            SELECT SUM(t.amount) AS month_total
+            FROM transactions t
+            WHERE t.user_id = %s
+              AND t.type = 'CREDIT'
+              AND t.transaction_date >= (CURRENT_DATE - INTERVAL '9 months')
+              AND ({scope})
+            GROUP BY DATE_TRUNC('month', t.transaction_date)
         ) q;
         """,
         (user_id,),
@@ -164,8 +241,12 @@ def _danger_from_ratio(ratio: float) -> str:
 
 
 def _build_emi_detection(conn, user_id: int) -> dict[str, Any]:
+    mode = "merged"
     cur = conn.cursor()
     try:
+        mode = fetch_dashboard_mode(cur, user_id)
+        scope = transaction_scope_sql("t", mode)
+
         cur.execute(
             """
             SELECT name, monthly_income::float
@@ -179,18 +260,22 @@ def _build_emi_detection(conn, user_id: int) -> dict[str, Any]:
             raise HTTPException(status_code=404, detail="User not found")
         user_name, monthly_income = user[0], float(user[1] or 0)
         if monthly_income <= 0:
-            monthly_income = _infer_monthly_income(cur, user_id)
+            monthly_income = _infer_monthly_income(cur, user_id, mode)
 
         cur.execute(
-            """
-            SELECT merchant, amount::float, transaction_date,
-                   COALESCE(category, ''), COALESCE(description, '')
-            FROM transactions
-            WHERE user_id = %s
-              AND type = 'DEBIT'
-              AND transaction_date >= (CURRENT_DATE - INTERVAL '6 months')
-              AND merchant IS NOT NULL
-              AND merchant <> '';
+            f"""
+            SELECT t.merchant, t.amount::float, t.transaction_date,
+                   COALESCE(t.category, ''), COALESCE(t.description, ''),
+                   COALESCE(cs.institution_name, ''), COALESCE(cs.source_type, '')
+            FROM transactions t
+            LEFT JOIN connected_sources cs
+              ON cs.id = t.connected_source_id AND cs.user_id = t.user_id
+            WHERE t.user_id = %s
+              AND t.type = 'DEBIT'
+              AND t.transaction_date >= (CURRENT_DATE - INTERVAL '6 months')
+              AND t.merchant IS NOT NULL
+              AND t.merchant <> ''
+              AND ({scope});
             """,
             (user_id,),
         )
@@ -199,21 +284,77 @@ def _build_emi_detection(conn, user_id: int) -> dict[str, Any]:
         cur.close()
 
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for merchant, amount, tx_date, category, description in rows:
-        grouped[str(merchant).strip()].append(
+    for merchant, amount, tx_date, category, description, institution, source_type in rows:
+        m = str(merchant).strip()
+        amt = float(amount or 0)
+        gkey = _emi_group_key(m, description or "", amt)
+        grouped[gkey].append(
             {
-                "amount": float(amount or 0),
+                "amount": amt,
                 "date": tx_date,
                 "category": category or "",
                 "description": description or "",
+                "merchant": m,
+                "institution": institution or "",
+                "source_type": source_type or "",
             }
         )
 
+    # Keywords that unambiguously flag a transaction as a loan/EMI repayment —
+    # strong enough to detect even from a single month of bank statement data.
+    _EXPLICIT_EMI_TRIGGERS = (
+        "emi auto debit", "auto debit", "emi debit", "loan emi",
+        "nach debit", "nach cr", "nach dr", "ecs debit",
+        "car loan", "home loan", "personal loan", "vehicle loan",
+        "loan repayment", "loan installment", "equated monthly",
+    )
+
     emi_entries: list[dict[str, Any]] = []
-    for merchant, txns in grouped.items():
+    seen_merchants: set[str] = set()
+
+    for _gkey, txns in grouped.items():
         txns_sorted = sorted(txns, key=lambda x: x["date"])
-        if len(txns_sorted) < 2:
-            continue
+        merchant = txns_sorted[0].get("merchant") or "Unknown"
+        institution = txns_sorted[0].get("institution") or ""
+        source_type = txns_sorted[0].get("source_type") or ""
+        source_name = _source_label(institution, source_type)
+        all_descs = " ".join(t["description"] for t in txns_sorted)
+        early_blob = f"{merchant} {all_descs}".lower()
+
+        # ── Single-occurrence path for explicitly labeled EMI/loan payments ──
+        # Bank statement uploads may only cover 1 month, so we can't require a
+        # multi-month streak. Instead, if the narration/merchant unambiguously
+        # indicates an EMI (e.g. "EMI AUTO DEBIT CAR LOAN"), we accept 1 entry.
+        if len(txns_sorted) == 1:
+            is_explicit = any(k in early_blob for k in _EXPLICIT_EMI_TRIGGERS)
+            tx = txns_sorted[0]
+            tx_amount = float(tx["amount"] or 0)
+            if is_explicit and tx_amount >= 1000:
+                m_blob = merchant.lower()
+                if not any(k in m_blob for k in SUBSCRIPTION_SKIP):
+                    emi_type = _classify_emi_type(
+                        merchant=merchant,
+                        category=tx["category"],
+                        amount=tx_amount,
+                        description_blob=tx["description"],
+                    )
+                    emi_entries.append(
+                        {
+                            "merchant": merchant,
+                            "amount": round(tx_amount, 2),
+                            "payment_date": tx["date"].day,
+                            "category": tx["category"],
+                            "emi_type": emi_type,
+                            "months_detected": 1,
+                            "first_detected": tx["date"].isoformat(),
+                            "last_detected": tx["date"].isoformat(),
+                            "next_due": _next_due_date(tx["date"].day, date.today()).isoformat(),
+                            "source_name": source_name,
+                            "source_type": source_type,
+                        }
+                    )
+                    seen_merchants.add(merchant)
+            continue  # always skip to next merchant after single-entry check
 
         amounts = [x["amount"] for x in txns_sorted]
         dates = [x["date"] for x in txns_sorted]
@@ -268,8 +409,16 @@ def _build_emi_detection(conn, user_id: int) -> dict[str, Any]:
                 "first_detected": streak_start.isoformat(),
                 "last_detected": streak_end.isoformat(),
                 "next_due": _next_due_date(med_day, date.today()).isoformat(),
+                "source_name": source_name,
+                "source_type": source_type,
             }
         )
+
+    cur_burden = conn.cursor()
+    try:
+        _append_card_statement_burden(cur_burden, user_id, mode, emi_entries)
+    finally:
+        cur_burden.close()
 
     emi_entries.sort(key=lambda x: x["amount"], reverse=True)
     total_burden = round(sum(x["amount"] for x in emi_entries), 2)

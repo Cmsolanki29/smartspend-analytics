@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from db import get_db
 from routes.emi_detector import _build_emi_detection
+from services.dashboard_scope import fetch_dashboard_mode, transaction_scope_sql
 from routes.festival_predictor import INDIAN_FESTIVALS_2026, _match_db_name
 from routes.purchase_planner import _add_months, _months_between
 
@@ -56,17 +57,20 @@ def _baseline_buffer(conn, user_id: int) -> float:
 
     cur = conn.cursor()
     try:
+        mode = fetch_dashboard_mode(cur, user_id)
+        scope = transaction_scope_sql("t", mode)
         cur.execute(
-            """
-            SELECT COALESCE(SUM(amount), 0)::float, COUNT(*)::int
-            FROM transactions
-            WHERE user_id = %s
-              AND type = 'DEBIT'
-              AND transaction_date >= CURRENT_DATE - INTERVAL '90 days'
-              AND LOWER(COALESCE(merchant, '') || ' ' || COALESCE(description, '')) NOT LIKE '%%emi%%'
-              AND LOWER(COALESCE(merchant, '') || ' ' || COALESCE(description, '')) NOT LIKE '%%loan%%'
-              AND LOWER(COALESCE(merchant, '') || ' ' || COALESCE(description, '')) NOT LIKE '%%nach%%'
-              AND LOWER(COALESCE(merchant, '') || ' ' || COALESCE(description, '')) NOT LIKE '%%ecs%%';
+            f"""
+            SELECT COALESCE(SUM(t.amount), 0)::float, COUNT(*)::int
+            FROM transactions t
+            WHERE t.user_id = %s
+              AND t.type = 'DEBIT'
+              AND t.transaction_date >= CURRENT_DATE - INTERVAL '90 days'
+              AND LOWER(COALESCE(t.merchant, '') || ' ' || COALESCE(t.description, '')) NOT LIKE '%%emi%%'
+              AND LOWER(COALESCE(t.merchant, '') || ' ' || COALESCE(t.description, '')) NOT LIKE '%%loan%%'
+              AND LOWER(COALESCE(t.merchant, '') || ' ' || COALESCE(t.description, '')) NOT LIKE '%%nach%%'
+              AND LOWER(COALESCE(t.merchant, '') || ' ' || COALESCE(t.description, '')) NOT LIKE '%%ecs%%'
+              AND ({scope});
             """,
             (user_id,),
         )

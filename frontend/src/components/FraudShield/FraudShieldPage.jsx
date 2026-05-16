@@ -284,6 +284,12 @@ const FraudShieldPage = ({ userId, userName }) => {
     load();
   }, [load, alertsTick]);
 
+  useEffect(() => {
+    const handler = () => load();
+    window.addEventListener("dashboardModeChanged", handler);
+    return () => window.removeEventListener("dashboardModeChanged", handler);
+  }, [load]);
+
   /** Sync tab when URL `fraudTab` changes without remount (e.g. mastery rail). */
   useEffect(() => {
     const sync = () => {

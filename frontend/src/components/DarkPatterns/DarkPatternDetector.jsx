@@ -168,6 +168,12 @@ const DarkPatternDetector = ({ userId }) => {
     loadProactive();
   }, [userId]);
 
+  useEffect(() => {
+    const handler = () => { load(); loadProactive(); };
+    window.addEventListener("dashboardModeChanged", handler);
+    return () => window.removeEventListener("dashboardModeChanged", handler);
+  }, [userId]);
+
   const strongestTrap = useMemo(() => {
     const traps = rupeeData?.traps || [];
     if (!traps.length) return null;

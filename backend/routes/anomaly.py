@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from db import get_db
 from models.schemas import AnomalyResponse
+from services.dashboard_scope import fetch_dashboard_mode, transaction_scope_sql
 from services.ml_model import ml_detector
 from services.pattern_analyzer import pattern_analyzer
 
@@ -78,11 +79,14 @@ def get_and_mark_alerts_read(user_id: int, conn=Depends(get_db)):
 def anomaly_stats_enhanced(user_id: int, conn=Depends(get_db)):
     cur = conn.cursor()
     try:
+        mode = fetch_dashboard_mode(cur, user_id)
+        scope = transaction_scope_sql("t", mode)
         cur.execute(
-            """
-            SELECT COALESCE(anomaly_reason, 'UNKNOWN'), risk_level, risk_score, merchant, amount
-            FROM transactions
-            WHERE user_id = %s AND anomaly_flag = TRUE;
+            f"""
+            SELECT COALESCE(t.anomaly_reason, 'UNKNOWN'), t.risk_level, t.risk_score, t.merchant, t.amount
+            FROM transactions t
+            WHERE t.user_id = %s AND t.anomaly_flag = TRUE
+              AND ({scope});
             """,
             (user_id,),
         )
@@ -169,11 +173,14 @@ def list_anomalies(
         raise HTTPException(400, "severity must be LOW, MEDIUM, HIGH, or CRITICAL")
     cur = conn.cursor()
     try:
-        q = """
-            SELECT id, merchant, amount, transaction_date, COALESCE(anomaly_reason, ''),
-                   risk_score, risk_level
-            FROM transactions
-            WHERE user_id = %s AND anomaly_flag = TRUE
+        mode = fetch_dashboard_mode(cur, user_id)
+        scope = transaction_scope_sql("t", mode)
+        q = f"""
+            SELECT t.id, t.merchant, t.amount, t.transaction_date, COALESCE(t.anomaly_reason, ''),
+                   t.risk_score, t.risk_level
+            FROM transactions t
+            WHERE t.user_id = %s AND t.anomaly_flag = TRUE
+              AND ({scope})
         """
         params: list[Any] = [user_id]
         if severity:

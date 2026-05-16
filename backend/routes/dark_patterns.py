@@ -10,6 +10,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 
 from db import get_db
+from services.dashboard_scope import fetch_dashboard_mode, transaction_scope_sql
 from services.openai_service import call_gpt
 
 router = APIRouter(prefix="/dark-patterns", tags=["Dark Patterns"])
@@ -34,14 +35,17 @@ def _to_dt(d: date, t: Any) -> datetime:
 def _fetch_transactions(conn, user_id: int, months: int = 18) -> list[dict[str, Any]]:
     cur = conn.cursor()
     try:
+        mode = fetch_dashboard_mode(cur, user_id)
+        scope = transaction_scope_sql("t", mode)
         cur.execute(
-            """
-            SELECT id, transaction_date, transaction_time, amount::float, COALESCE(type, ''),
-                   COALESCE(merchant, ''), COALESCE(category, ''), COALESCE(description, '')
-            FROM transactions
-            WHERE user_id = %s
-              AND transaction_date >= (CURRENT_DATE - (%s || ' months')::interval)
-            ORDER BY transaction_date, transaction_time;
+            f"""
+            SELECT t.id, t.transaction_date, t.transaction_time, t.amount::float, COALESCE(t.type, ''),
+                   COALESCE(t.merchant, ''), COALESCE(t.category, ''), COALESCE(t.description, '')
+            FROM transactions t
+            WHERE t.user_id = %s
+              AND t.transaction_date >= (CURRENT_DATE - (%s || ' months')::interval)
+              AND ({scope})
+            ORDER BY t.transaction_date, t.transaction_time;
             """,
             (user_id, months),
         )

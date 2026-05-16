@@ -213,6 +213,12 @@ export function SubscriptionIntelligenceProvider({
     return () => window.removeEventListener("ss-subscription-intel-refresh", onRefresh);
   }, [refreshAll]);
 
+  useEffect(() => {
+    const handler = () => { void refreshAll(); };
+    window.addEventListener("dashboardModeChanged", handler);
+    return () => window.removeEventListener("dashboardModeChanged", handler);
+  }, [refreshAll]);
+
   const value = useMemo<SubscriptionIntelligenceContextValue>(
     () => ({
       userId,

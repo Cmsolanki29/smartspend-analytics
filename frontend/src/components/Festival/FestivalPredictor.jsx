@@ -124,6 +124,12 @@ const FestivalPredictor = ({ userId }) => {
     };
   }, [userId, load]);
 
+  useEffect(() => {
+    const handler = () => load();
+    window.addEventListener("dashboardModeChanged", handler);
+    return () => window.removeEventListener("dashboardModeChanged", handler);
+  }, [load]);
+
   const openBudget = (f) => {
     setBudgetFest(f);
     setPlanned(String(f.recommended_budget ?? ""));

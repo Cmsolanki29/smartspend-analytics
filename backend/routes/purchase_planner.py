@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from db import get_db
 from services.ai_service import call_groq
+from services.dashboard_scope import fetch_dashboard_mode, transaction_scope_sql
 
 router = APIRouter(prefix="/purchases", tags=["Purchase Planner"])
 
@@ -95,13 +96,16 @@ def _emi_cash_payload(amount: float) -> dict[str, Any]:
 
 def _top_category_spends(conn, user_id: int) -> list[tuple[str, float]]:
     cur = conn.cursor()
+    mode = fetch_dashboard_mode(cur, user_id)
+    scope = transaction_scope_sql("t", mode)
     cur.execute(
-        """
-        SELECT COALESCE(NULLIF(TRIM(category), ''), 'Other') AS c,
-               SUM(amount)::float AS s
-        FROM transactions
-        WHERE user_id = %s AND type = 'DEBIT'
-          AND transaction_date >= CURRENT_DATE - INTERVAL '90 days'
+        f"""
+        SELECT COALESCE(NULLIF(TRIM(t.category), ''), 'Other') AS c,
+               SUM(t.amount)::float AS s
+        FROM transactions t
+        WHERE t.user_id = %s AND t.type = 'DEBIT'
+          AND t.transaction_date >= CURRENT_DATE - INTERVAL '90 days'
+          AND ({scope})
         GROUP BY 1
         ORDER BY s DESC
         LIMIT 6;

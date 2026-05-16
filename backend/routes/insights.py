@@ -18,6 +18,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from db import get_connection, get_db
+from services.dashboard_scope import fetch_dashboard_mode, transaction_scope_sql
 from services.openai_service import (
     explain_anomaly_transaction,
     generate_health_narrative,
@@ -48,6 +49,9 @@ def build_user_data(conn, user_id: int, month: int, year: int) -> dict[str, Any]
     """
     cur = conn.cursor()
     try:
+        mode = fetch_dashboard_mode(cur, user_id)
+        scope = transaction_scope_sql("t", mode)
+
         cur.execute(
             """
             SELECT id, name, email, monthly_income::float, savings_goal::float
@@ -83,13 +87,14 @@ def build_user_data(conn, user_id: int, month: int, year: int) -> dict[str, Any]
             anomaly_count = int(anomaly_count or 0)
         else:
             cur.execute(
-                """
-                SELECT COALESCE(SUM(CASE WHEN type = 'CREDIT' THEN amount ELSE 0 END), 0)::float,
-                       COALESCE(SUM(CASE WHEN type = 'DEBIT' THEN amount ELSE 0 END), 0)::float
-                FROM transactions
-                WHERE user_id = %s
-                  AND EXTRACT(MONTH FROM transaction_date)::int = %s
-                  AND EXTRACT(YEAR FROM transaction_date)::int = %s;
+                f"""
+                SELECT COALESCE(SUM(CASE WHEN t.type = 'CREDIT' THEN t.amount ELSE 0 END), 0)::float,
+                       COALESCE(SUM(CASE WHEN t.type = 'DEBIT' THEN t.amount ELSE 0 END), 0)::float
+                FROM transactions t
+                WHERE t.user_id = %s
+                  AND EXTRACT(MONTH FROM t.transaction_date)::int = %s
+                  AND EXTRACT(YEAR FROM t.transaction_date)::int = %s
+                  AND ({scope});
                 """,
                 (user_id, month, year),
             )
@@ -101,11 +106,12 @@ def build_user_data(conn, user_id: int, month: int, year: int) -> dict[str, Any]
                 round(total_saved / total_income * 100, 2) if total_income > 0 else 0.0
             )
             cur.execute(
-                """
-                SELECT COUNT(*)::int FROM transactions
-                WHERE user_id = %s AND anomaly_flag = TRUE
-                  AND EXTRACT(MONTH FROM transaction_date)::int = %s
-                  AND EXTRACT(YEAR FROM transaction_date)::int = %s;
+                f"""
+                SELECT COUNT(*)::int FROM transactions t
+                WHERE t.user_id = %s AND t.anomaly_flag = TRUE
+                  AND EXTRACT(MONTH FROM t.transaction_date)::int = %s
+                  AND EXTRACT(YEAR FROM t.transaction_date)::int = %s
+                  AND ({scope});
                 """,
                 (user_id, month, year),
             )
@@ -115,12 +121,13 @@ def build_user_data(conn, user_id: int, month: int, year: int) -> dict[str, Any]
         health_score = int(hs_live.score)
 
         cur.execute(
-            """
-            SELECT COALESCE(category, 'Uncategorized') AS c, SUM(amount)::float AS amt
-            FROM transactions
-            WHERE user_id = %s AND type = 'DEBIT'
-              AND EXTRACT(MONTH FROM transaction_date)::int = %s
-              AND EXTRACT(YEAR FROM transaction_date)::int = %s
+            f"""
+            SELECT COALESCE(t.category, 'Uncategorized') AS c, SUM(t.amount)::float AS amt
+            FROM transactions t
+            WHERE t.user_id = %s AND t.type = 'DEBIT'
+              AND EXTRACT(MONTH FROM t.transaction_date)::int = %s
+              AND EXTRACT(YEAR FROM t.transaction_date)::int = %s
+              AND ({scope})
             GROUP BY 1 ORDER BY amt DESC LIMIT 12;
             """,
             (user_id, month, year),
@@ -139,13 +146,14 @@ def build_user_data(conn, user_id: int, month: int, year: int) -> dict[str, Any]
             )
 
         cur.execute(
-            """
-            SELECT merchant, SUM(amount)::float AS s
-            FROM transactions
-            WHERE user_id = %s AND type = 'DEBIT' AND merchant IS NOT NULL
-              AND EXTRACT(MONTH FROM transaction_date)::int = %s
-              AND EXTRACT(YEAR FROM transaction_date)::int = %s
-            GROUP BY merchant ORDER BY s DESC LIMIT 5;
+            f"""
+            SELECT t.merchant, SUM(t.amount)::float AS s
+            FROM transactions t
+            WHERE t.user_id = %s AND t.type = 'DEBIT' AND t.merchant IS NOT NULL
+              AND EXTRACT(MONTH FROM t.transaction_date)::int = %s
+              AND EXTRACT(YEAR FROM t.transaction_date)::int = %s
+              AND ({scope})
+            GROUP BY t.merchant ORDER BY s DESC LIMIT 5;
             """,
             (user_id, month, year),
         )
@@ -165,13 +173,14 @@ def build_user_data(conn, user_id: int, month: int, year: int) -> dict[str, Any]
             last_month_expense, last_month_saved = float(lm[0] or 0), float(lm[1] or 0)
         else:
             cur.execute(
-                """
-                SELECT COALESCE(SUM(CASE WHEN type = 'CREDIT' THEN amount ELSE 0 END), 0)::float,
-                       COALESCE(SUM(CASE WHEN type = 'DEBIT' THEN amount ELSE 0 END), 0)::float
-                FROM transactions
-                WHERE user_id = %s
-                  AND EXTRACT(MONTH FROM transaction_date)::int = %s
-                  AND EXTRACT(YEAR FROM transaction_date)::int = %s;
+                f"""
+                SELECT COALESCE(SUM(CASE WHEN t.type = 'CREDIT' THEN t.amount ELSE 0 END), 0)::float,
+                       COALESCE(SUM(CASE WHEN t.type = 'DEBIT' THEN t.amount ELSE 0 END), 0)::float
+                FROM transactions t
+                WHERE t.user_id = %s
+                  AND EXTRACT(MONTH FROM t.transaction_date)::int = %s
+                  AND EXTRACT(YEAR FROM t.transaction_date)::int = %s
+                  AND ({scope});
                 """,
                 (user_id, pm, py),
             )
@@ -381,14 +390,18 @@ def quick_summary(
             raise HTTPException(status_code=404, detail="User not found")
         display_name = r[0]
 
+        _mode = fetch_dashboard_mode(cur, user_id)
+        _scope = transaction_scope_sql("t", _mode)
+
         cur.execute(
-            """
-            SELECT COALESCE(SUM(CASE WHEN type = 'CREDIT' THEN amount ELSE 0 END), 0)::float,
-                   COALESCE(SUM(CASE WHEN type = 'DEBIT' THEN amount ELSE 0 END), 0)::float
-            FROM transactions
-            WHERE user_id = %s
-              AND EXTRACT(MONTH FROM transaction_date)::int = %s
-              AND EXTRACT(YEAR FROM transaction_date)::int = %s;
+            f"""
+            SELECT COALESCE(SUM(CASE WHEN t.type = 'CREDIT' THEN t.amount ELSE 0 END), 0)::float,
+                   COALESCE(SUM(CASE WHEN t.type = 'DEBIT' THEN t.amount ELSE 0 END), 0)::float
+            FROM transactions t
+            WHERE t.user_id = %s
+              AND EXTRACT(MONTH FROM t.transaction_date)::int = %s
+              AND EXTRACT(YEAR FROM t.transaction_date)::int = %s
+              AND ({_scope});
             """,
             (user_id, m, y),
         )
@@ -406,12 +419,13 @@ def quick_summary(
         alerts_pending = int(cur.fetchone()[0] or 0)
 
         cur.execute(
-            """
-            SELECT COALESCE(category, 'Uncategorized'), SUM(amount)::float
-            FROM transactions
-            WHERE user_id = %s AND type = 'DEBIT'
-              AND EXTRACT(MONTH FROM transaction_date)::int = %s
-              AND EXTRACT(YEAR FROM transaction_date)::int = %s
+            f"""
+            SELECT COALESCE(t.category, 'Uncategorized'), SUM(t.amount)::float
+            FROM transactions t
+            WHERE t.user_id = %s AND t.type = 'DEBIT'
+              AND EXTRACT(MONTH FROM t.transaction_date)::int = %s
+              AND EXTRACT(YEAR FROM t.transaction_date)::int = %s
+              AND ({_scope})
             GROUP BY 1 ORDER BY 2 DESC LIMIT 1;
             """,
             (user_id, m, y),

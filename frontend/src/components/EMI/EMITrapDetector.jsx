@@ -163,6 +163,12 @@ export default function EMITrapDetector({ userId }) {
     load();
   }, [load]);
 
+  useEffect(() => {
+    const handler = () => load();
+    window.addEventListener("dashboardModeChanged", handler);
+    return () => window.removeEventListener("dashboardModeChanged", handler);
+  }, [load]);
+
   // Load financial engine pre-check snapshot (non-blocking, 8s timeout)
   useEffect(() => {
     if (!userId) return;
@@ -425,6 +431,9 @@ export default function EMITrapDetector({ userId }) {
                   </span>
                   <div className="min-w-0">
                     <p className="truncate font-medium text-white">{emi.merchant}</p>
+                    {emi.source_name ? (
+                      <p className="text-xs text-violet-300/90">{emi.source_name}</p>
+                    ) : null}
                     <p className="text-xs text-gray-500">
                       {emi.emi_type} · typical debit ~day {emi.payment_date} · {emi.months_detected} mo. streak
                     </p>

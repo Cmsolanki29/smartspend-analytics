@@ -161,6 +161,12 @@ const AIInsightsPanel = ({ userId, month, year, presentation = "default" }) => {
     fetchInsights();
   }, [fetchInsights]);
 
+  useEffect(() => {
+    const handler = () => fetchInsights();
+    window.addEventListener("dashboardModeChanged", handler);
+    return () => window.removeEventListener("dashboardModeChanged", handler);
+  }, [fetchInsights]);
+
   const insight = state.data?.insights || {};
   const verdict = verdictMeta[insight.spending_verdict] || verdictMeta.AVERAGE;
   const VerdictIcon = verdict.Icon;

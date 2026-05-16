@@ -84,6 +84,12 @@ export default function ConnectedAccountsSettings({ userId, onGoUpload }) {
       await toggleSourceVisibility({ userId, sourceId, visible: next });
       await load();
       await reloadUser();
+      // Notify all modules to re-fetch with updated account visibility
+      try {
+        window.dispatchEvent(new CustomEvent("dashboardModeChanged", { detail: { mode } }));
+      } catch {
+        /* ignore */
+      }
     } catch (e) {
       setSources(snapshot);
       setErr(e instanceof Error ? e.message : "Update failed");

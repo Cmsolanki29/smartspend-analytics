@@ -246,39 +246,39 @@ export default function Dashboard({
     setLastRefresh(new Date());
   }, [refetch]);
 
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      setIntel((s) => ({ ...s, loading: true }));
-      try {
-        const [alertsRes, subsRes, festRes, darkRes, emiRes] = await Promise.all([
-          getFraudShieldAlerts(userId),
-          getSubscriptions(userId),
-          getFestivals(userId),
-          getDarkPatterns(userId).catch(() => []),
-          getEmiReport(userId).catch(() => ({ emis_detected: [] })),
-        ]);
-        const pending = (alertsRes?.alerts || []).filter((a: { user_action?: string }) => a.user_action === "PENDING").length;
-        const waste = Number(subsRes?.monthly_waste || 0);
-        const nf = festRes?.next_festival || null;
-        const darkList = darkRes?.patterns || (Array.isArray(darkRes) ? darkRes : []) || [];
-        const darkCount = Array.isArray(darkList) ? darkList.length : 0;
-        const emis = emiRes?.emis_detected || emiRes?.emis || [];
-        const emiCount = Array.isArray(emis) ? emis.length : Number(emiRes?.emi_detected_count || 0);
+  const loadIntel = useCallback(async () => {
+    setIntel((s) => ({ ...s, loading: true }));
+    try {
+      const [alertsRes, subsRes, festRes, darkRes, emiRes] = await Promise.all([
+        getFraudShieldAlerts(userId),
+        getSubscriptions(userId),
+        getFestivals(userId),
+        getDarkPatterns(userId).catch(() => []),
+        getEmiReport(userId).catch(() => ({ emis_detected: [] })),
+      ]);
+      const pending = (alertsRes?.alerts || []).filter((a: { user_action?: string }) => a.user_action === "PENDING").length;
+      const waste = Number(subsRes?.monthly_waste || 0);
+      const nf = festRes?.next_festival || null;
+      const darkList = darkRes?.patterns || (Array.isArray(darkRes) ? darkRes : []) || [];
+      const darkCount = Array.isArray(darkList) ? darkList.length : 0;
+      const emis = emiRes?.emis_detected || emiRes?.emis || [];
+      const emiCount = Array.isArray(emis) ? emis.length : Number(emiRes?.emi_detected_count || 0);
 
-        if (!cancelled) {
-          setIntel({ loading: false, fraudPending: pending, monthlyWaste: waste, nextFest: nf, darkCount, emiCount });
-        }
-      } catch {
-        if (!cancelled) {
-          setIntel({ loading: false, fraudPending: 0, monthlyWaste: 0, nextFest: null, darkCount: 0, emiCount: 0 });
-        }
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
+      setIntel({ loading: false, fraudPending: pending, monthlyWaste: waste, nextFest: nf, darkCount, emiCount });
+    } catch {
+      setIntel({ loading: false, fraudPending: 0, monthlyWaste: 0, nextFest: null, darkCount: 0, emiCount: 0 });
+    }
   }, [userId]);
+
+  useEffect(() => {
+    loadIntel();
+  }, [loadIntel]);
+
+  useEffect(() => {
+    const handler = () => loadIntel();
+    window.addEventListener("dashboardModeChanged", handler);
+    return () => window.removeEventListener("dashboardModeChanged", handler);
+  }, [loadIntel]);
 
   useEffect(() => {
     let cancelled = false;

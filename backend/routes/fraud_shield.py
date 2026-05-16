@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from db import get_db
 from services.ai_service import call_groq
+from services.dashboard_scope import fetch_dashboard_mode, transaction_scope_sql
 
 router = APIRouter(prefix="/fraud-shield", tags=["Fraud Shield"])
 
@@ -368,33 +369,39 @@ def _load_user_history(
     cur = conn.cursor()
     payee_norm = (payee or "").strip()
 
+    mode = fetch_dashboard_mode(cur, user_id)
+    scope = transaction_scope_sql("t", mode)
+
     cur.execute(
-        """
-        SELECT COALESCE(AVG(amount), 0)
-        FROM transactions
-        WHERE user_id = %s AND type = 'DEBIT'
-          AND transaction_date >= %s;
+        f"""
+        SELECT COALESCE(AVG(t.amount), 0)
+        FROM transactions t
+        WHERE t.user_id = %s AND t.type = 'DEBIT'
+          AND t.transaction_date >= %s
+          AND ({scope});
         """,
         (user_id, at.date() - timedelta(days=30)),
     )
     avg_debit = float(cur.fetchone()[0] or 0)
 
     cur.execute(
-        """
-        SELECT COUNT(*) FROM transactions
-        WHERE user_id = %s AND type = 'DEBIT'
-          AND LOWER(TRIM(COALESCE(merchant,''))) = LOWER(TRIM(%s));
+        f"""
+        SELECT COUNT(*) FROM transactions t
+        WHERE t.user_id = %s AND t.type = 'DEBIT'
+          AND LOWER(TRIM(COALESCE(t.merchant,''))) = LOWER(TRIM(%s))
+          AND ({scope});
         """,
         (user_id, payee_norm),
     )
     payee_previous_debit_count = int(cur.fetchone()[0] or 0)
 
     cur.execute(
-        """
-        SELECT COUNT(*) FROM transactions
-        WHERE user_id = %s AND type = 'DEBIT'
-          AND (transaction_date + transaction_time) >= %s
-          AND (transaction_date + transaction_time) <= %s;
+        f"""
+        SELECT COUNT(*) FROM transactions t
+        WHERE t.user_id = %s AND t.type = 'DEBIT'
+          AND (t.transaction_date + t.transaction_time) >= %s
+          AND (t.transaction_date + t.transaction_time) <= %s
+          AND ({scope});
         """,
         (
             user_id,
@@ -405,11 +412,12 @@ def _load_user_history(
     debits_last_30_min = int(cur.fetchone()[0] or 0)
 
     cur.execute(
-        """
-        SELECT COUNT(*) FROM transactions
-        WHERE user_id = %s AND type = 'DEBIT'
-          AND (transaction_date + transaction_time) >= %s
-          AND (transaction_date + transaction_time) <= %s;
+        f"""
+        SELECT COUNT(*) FROM transactions t
+        WHERE t.user_id = %s AND t.type = 'DEBIT'
+          AND (t.transaction_date + t.transaction_time) >= %s
+          AND (t.transaction_date + t.transaction_time) <= %s
+          AND ({scope});
         """,
         (
             user_id,
@@ -420,24 +428,26 @@ def _load_user_history(
     debits_last_10_min = int(cur.fetchone()[0] or 0)
 
     cur.execute(
-        """
-        SELECT COUNT(*) FROM transactions
-        WHERE user_id = %s AND type = 'DEBIT'
-          AND LOWER(TRIM(COALESCE(merchant,''))) = LOWER(TRIM(%s))
-          AND amount BETWEEN 1 AND 10
-          AND transaction_date >= %s;
+        f"""
+        SELECT COUNT(*) FROM transactions t
+        WHERE t.user_id = %s AND t.type = 'DEBIT'
+          AND LOWER(TRIM(COALESCE(t.merchant,''))) = LOWER(TRIM(%s))
+          AND t.amount BETWEEN 1 AND 10
+          AND t.transaction_date >= %s
+          AND ({scope});
         """,
         (user_id, payee_norm, at.date() - timedelta(days=30)),
     )
     small_debits_to_payee_30d = int(cur.fetchone()[0] or 0)
 
     cur.execute(
-        """
+        f"""
         SELECT EXISTS (
-          SELECT 1 FROM transactions
-          WHERE user_id = %s AND type = 'CREDIT'
-            AND (transaction_date + transaction_time) <= %s
-            AND (transaction_date + transaction_time) >= %s
+          SELECT 1 FROM transactions t
+          WHERE t.user_id = %s AND t.type = 'CREDIT'
+            AND (t.transaction_date + t.transaction_time) <= %s
+            AND (t.transaction_date + t.transaction_time) >= %s
+            AND ({scope})
         );
         """,
         (
@@ -754,10 +764,13 @@ def analyze_fraud(user_id: int, conn=Depends(get_db)):
     user_name = urow[0]
 
     since = date.today() - timedelta(days=30)
+    _mode = fetch_dashboard_mode(cur, user_id)
+    _scope = transaction_scope_sql("t", _mode)
     cur.execute(
-        """
-        SELECT COUNT(*) FROM transactions
-        WHERE user_id = %s AND transaction_date >= %s;
+        f"""
+        SELECT COUNT(*) FROM transactions t
+        WHERE t.user_id = %s AND t.transaction_date >= %s
+          AND ({_scope});
         """,
         (user_id, since),
     )

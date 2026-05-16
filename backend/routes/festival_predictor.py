@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from db import get_db
 from services.ai_service import call_groq
+from services.dashboard_scope import fetch_dashboard_mode, transaction_scope_sql
 
 router = APIRouter(prefix="/festivals", tags=["Festival Predictor"])
 
@@ -84,18 +85,21 @@ def _avg_monthly_saved(conn, user_id: int, months: int = 6) -> float:
 def _subscription_monthly_total(conn, user_id: int) -> float:
     """Approximate dead subscription spend from recurring-style merchants (last 90d / 3)."""
     cur = conn.cursor()
+    mode = fetch_dashboard_mode(cur, user_id)
+    scope = transaction_scope_sql("t", mode)
     cur.execute(
-        """
-        SELECT COALESCE(SUM(amount), 0)::float / 3.0
-        FROM transactions
-        WHERE user_id = %s AND type = 'DEBIT'
-          AND transaction_date >= CURRENT_DATE - INTERVAL '90 days'
+        f"""
+        SELECT COALESCE(SUM(t.amount), 0)::float / 3.0
+        FROM transactions t
+        WHERE t.user_id = %s AND t.type = 'DEBIT'
+          AND t.transaction_date >= CURRENT_DATE - INTERVAL '90 days'
+          AND ({scope})
           AND (
-            LOWER(COALESCE(merchant,'')) LIKE '%%netflix%%'
-            OR LOWER(COALESCE(merchant,'')) LIKE '%%spotify%%'
-            OR LOWER(COALESCE(merchant,'')) LIKE '%%prime%%'
-            OR LOWER(COALESCE(merchant,'')) LIKE '%%hotstar%%'
-            OR LOWER(COALESCE(merchant,'')) LIKE '%%youtube%%'
+            LOWER(COALESCE(t.merchant,'')) LIKE '%%netflix%%'
+            OR LOWER(COALESCE(t.merchant,'')) LIKE '%%spotify%%'
+            OR LOWER(COALESCE(t.merchant,'')) LIKE '%%prime%%'
+            OR LOWER(COALESCE(t.merchant,'')) LIKE '%%hotstar%%'
+            OR LOWER(COALESCE(t.merchant,'')) LIKE '%%youtube%%'
           );
         """,
         (user_id,),
@@ -107,17 +111,20 @@ def _subscription_monthly_total(conn, user_id: int) -> float:
 
 def _food_delivery_monthly(conn, user_id: int) -> float:
     cur = conn.cursor()
+    mode = fetch_dashboard_mode(cur, user_id)
+    scope = transaction_scope_sql("t", mode)
     cur.execute(
-        """
-        SELECT COALESCE(SUM(amount), 0)::float / 3.0
-        FROM transactions
-        WHERE user_id = %s AND type = 'DEBIT'
-          AND transaction_date >= CURRENT_DATE - INTERVAL '90 days'
+        f"""
+        SELECT COALESCE(SUM(t.amount), 0)::float / 3.0
+        FROM transactions t
+        WHERE t.user_id = %s AND t.type = 'DEBIT'
+          AND t.transaction_date >= CURRENT_DATE - INTERVAL '90 days'
+          AND ({scope})
           AND (
-            LOWER(COALESCE(merchant,'')) LIKE '%%swiggy%%'
-            OR LOWER(COALESCE(merchant,'')) LIKE '%%zomato%%'
-            OR LOWER(COALESCE(merchant,'')) LIKE '%%uber eats%%'
-            OR LOWER(COALESCE(category,'')) LIKE '%%food%%'
+            LOWER(COALESCE(t.merchant,'')) LIKE '%%swiggy%%'
+            OR LOWER(COALESCE(t.merchant,'')) LIKE '%%zomato%%'
+            OR LOWER(COALESCE(t.merchant,'')) LIKE '%%uber eats%%'
+            OR LOWER(COALESCE(t.category,'')) LIKE '%%food%%'
           );
         """,
         (user_id,),

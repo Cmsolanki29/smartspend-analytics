@@ -70,6 +70,12 @@ const PurchasePlanner = ({ userId }) => {
     };
   }, [userId, load]);
 
+  useEffect(() => {
+    const handler = () => load();
+    window.addEventListener("dashboardModeChanged", handler);
+    return () => window.removeEventListener("dashboardModeChanged", handler);
+  }, [load]);
+
   const goals = (data?.goals || []).slice().sort((a, b) => priorityRank(a.priority) - priorityRank(b.priority));
 
   const quick = (label, cat) => {

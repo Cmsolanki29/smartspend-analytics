@@ -149,14 +149,26 @@ class PDFParserAgent:
 
     @staticmethod
     def _is_duplicate(conn, user_id: int, date: str, merchant: str, amount: float) -> bool:
+        # A transaction is only a "real" duplicate when it already exists in a
+        # VISIBLE source (or has no source).  Transactions trapped in a hidden /
+        # turned-off source are NOT counted — so re-uploading the same statement
+        # under a new visible source correctly imports those transactions.
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT COUNT(*) FROM transactions
-                WHERE user_id = %s
-                  AND transaction_date::date = %s
-                  AND LOWER(merchant) = LOWER(%s)
-                  AND ABS(amount - %s) < 5
+                SELECT COUNT(*) FROM transactions t
+                WHERE t.user_id = %s
+                  AND t.transaction_date::date = %s
+                  AND LOWER(t.merchant) = LOWER(%s)
+                  AND ABS(t.amount - %s) < 5
+                  AND (
+                    t.connected_source_id IS NULL
+                    OR NOT EXISTS (
+                      SELECT 1 FROM connected_sources cs
+                      WHERE cs.id = t.connected_source_id
+                        AND COALESCE(cs.is_visible_on_dashboard, false) = false
+                    )
+                  )
                 """,
                 (user_id, date, merchant, amount),
             )

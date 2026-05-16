@@ -364,6 +364,12 @@ export default function FamilyEventsPage({ userId }) {
 
   useEffect(() => { load(); }, [load]);
 
+  useEffect(() => {
+    const handler = () => load();
+    window.addEventListener("dashboardModeChanged", handler);
+    return () => window.removeEventListener("dashboardModeChanged", handler);
+  }, [load]);
+
   const showToast = (msg) => {
     setToast(msg);
     setTimeout(() => setToast(""), 4000);

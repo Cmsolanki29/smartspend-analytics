@@ -10,6 +10,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 
 from db import get_db
+from services.dashboard_scope import fetch_dashboard_mode, transaction_scope_sql
 from services.openai_service import call_gpt
 from utils.user_profile import fetch_user_display_name_and_income
 
@@ -74,7 +75,21 @@ def _days_since(last_date: date | None) -> int:
     return (date.today() - last_date).days
 
 
-def _usage_for_subscription(conn, user_id: int, merchant: str, category: str) -> tuple[int, int]:
+def _source_label(institution: str, source_type: str) -> str:
+    inst = (institution or "").strip() or "Unknown source"
+    st = (source_type or "").strip().lower()
+    if st == "credit_card":
+        return f"{inst} (Credit Card)"
+    if st in ("bank", "bank_statement_pdf"):
+        return f"{inst} (Bank)"
+    if st:
+        return f"{inst} ({st.replace('_', ' ')})"
+    return inst
+
+
+def _usage_for_subscription(
+    conn, user_id: int, merchant: str, category: str, scope: str = "TRUE"
+) -> tuple[int, int]:
     cur = conn.cursor()
     try:
         m = merchant.lower()
@@ -82,13 +97,14 @@ def _usage_for_subscription(conn, user_id: int, merchant: str, category: str) ->
 
         if "swiggy one" in m:
             cur.execute(
-                """
-                SELECT COUNT(*)::int, MAX(transaction_date)
-                FROM transactions
-                WHERE user_id = %s
-                  AND merchant ILIKE '%%swiggy%%'
-                  AND merchant NOT ILIKE '%%one%%'
-                  AND transaction_date >= (CURRENT_DATE - INTERVAL '30 days');
+                f"""
+                SELECT COUNT(*)::int, MAX(t.transaction_date)
+                FROM transactions t
+                WHERE t.user_id = %s
+                  AND t.merchant ILIKE '%%swiggy%%'
+                  AND t.merchant NOT ILIKE '%%one%%'
+                  AND t.transaction_date >= (CURRENT_DATE - INTERVAL '30 days')
+                  AND ({scope});
                 """,
                 (user_id,),
             )
@@ -109,13 +125,14 @@ def _usage_for_subscription(conn, user_id: int, merchant: str, category: str) ->
                 else "sony"
             )
             cur.execute(
-                """
-                SELECT COUNT(*)::int, MAX(transaction_date)
-                FROM transactions
-                WHERE user_id = %s
-                  AND transaction_date >= (CURRENT_DATE - INTERVAL '60 days')
-                  AND (merchant ILIKE %s OR description ILIKE %s)
-                  AND merchant NOT ILIKE %s;
+                f"""
+                SELECT COUNT(*)::int, MAX(t.transaction_date)
+                FROM transactions t
+                WHERE t.user_id = %s
+                  AND t.transaction_date >= (CURRENT_DATE - INTERVAL '60 days')
+                  AND (t.merchant ILIKE %s OR t.description ILIKE %s)
+                  AND t.merchant NOT ILIKE %s
+                  AND ({scope});
                 """,
                 (user_id, f"%{token}%", f"%{token}%", f"%{merchant}%"),
             )
@@ -124,12 +141,13 @@ def _usage_for_subscription(conn, user_id: int, merchant: str, category: str) ->
             # Popular OTTs can stay active from general entertainment frequency.
             if base_count == 0 and token in ("netflix", "hotstar", "prime"):
                 cur.execute(
-                    """
-                    SELECT COUNT(*)::int, MAX(transaction_date)
-                    FROM transactions
-                    WHERE user_id = %s
-                      AND category ILIKE '%%entertainment%%'
-                      AND transaction_date >= (CURRENT_DATE - INTERVAL '30 days');
+                    f"""
+                    SELECT COUNT(*)::int, MAX(t.transaction_date)
+                    FROM transactions t
+                    WHERE t.user_id = %s
+                      AND t.category ILIKE '%%entertainment%%'
+                      AND t.transaction_date >= (CURRENT_DATE - INTERVAL '30 days')
+                      AND ({scope});
                     """,
                     (user_id,),
                 )
@@ -141,19 +159,20 @@ def _usage_for_subscription(conn, user_id: int, merchant: str, category: str) ->
 
         if any(k in m for k in ("gym", "cult", "fitness", "workout")) or "health" in c:
             cur.execute(
-                """
-                SELECT COUNT(*)::int, MAX(transaction_date)
-                FROM transactions
-                WHERE user_id = %s
+                f"""
+                SELECT COUNT(*)::int, MAX(t.transaction_date)
+                FROM transactions t
+                WHERE t.user_id = %s
                   AND (
-                    merchant ILIKE '%%gym%%'
-                    OR merchant ILIKE '%%fit%%'
-                    OR description ILIKE '%%gym%%'
-                    OR description ILIKE '%%fitness%%'
-                    OR description ILIKE '%%workout%%'
+                    t.merchant ILIKE '%%gym%%'
+                    OR t.merchant ILIKE '%%fit%%'
+                    OR t.description ILIKE '%%gym%%'
+                    OR t.description ILIKE '%%fitness%%'
+                    OR t.description ILIKE '%%workout%%'
                   )
-                  AND merchant NOT ILIKE %s
-                  AND transaction_date >= (CURRENT_DATE - INTERVAL '90 days');
+                  AND t.merchant NOT ILIKE %s
+                  AND t.transaction_date >= (CURRENT_DATE - INTERVAL '90 days')
+                  AND ({scope});
                 """,
                 (user_id, f"%{merchant}%"),
             )
@@ -163,13 +182,14 @@ def _usage_for_subscription(conn, user_id: int, merchant: str, category: str) ->
 
         token = merchant.split(" ")[0]
         cur.execute(
-            """
-            SELECT COUNT(*)::int, MAX(transaction_date)
-            FROM transactions
-            WHERE user_id = %s
-              AND (merchant ILIKE %s OR description ILIKE %s)
-              AND merchant NOT ILIKE %s
-              AND transaction_date >= (CURRENT_DATE - INTERVAL '120 days');
+            f"""
+            SELECT COUNT(*)::int, MAX(t.transaction_date)
+            FROM transactions t
+            WHERE t.user_id = %s
+              AND (t.merchant ILIKE %s OR t.description ILIKE %s)
+              AND t.merchant NOT ILIKE %s
+              AND t.transaction_date >= (CURRENT_DATE - INTERVAL '120 days')
+              AND ({scope});
             """,
             (user_id, f"%{token}%", f"%{token}%", f"%{merchant}%"),
         )
@@ -221,17 +241,25 @@ def build_subscription_dashboard(user_id: int, conn) -> dict:
         user_name, _monthly_income = fetch_user_display_name_and_income(conn, user_id)
     except ValueError:
         raise HTTPException(status_code=404, detail="User not found")
+    scope = "TRUE"
     cur = conn.cursor()
     try:
+        mode = fetch_dashboard_mode(cur, user_id)
+        scope = transaction_scope_sql("t", mode)
         cur.execute(
-            """
-            SELECT merchant, amount::float, transaction_date, COALESCE(category, ''), COALESCE(description, '')
-            FROM transactions
-            WHERE user_id = %s
-              AND type = 'DEBIT'
-              AND transaction_date >= (CURRENT_DATE - INTERVAL '14 months')
-              AND merchant IS NOT NULL
-              AND merchant <> '';
+            f"""
+            SELECT t.merchant, t.amount::float, t.transaction_date,
+                   COALESCE(t.category, ''), COALESCE(t.description, ''),
+                   COALESCE(cs.institution_name, ''), COALESCE(cs.source_type, '')
+            FROM transactions t
+            LEFT JOIN connected_sources cs
+              ON cs.id = t.connected_source_id AND cs.user_id = t.user_id
+            WHERE t.user_id = %s
+              AND t.type = 'DEBIT'
+              AND t.transaction_date >= (CURRENT_DATE - INTERVAL '14 months')
+              AND t.merchant IS NOT NULL
+              AND t.merchant <> ''
+              AND ({scope});
             """,
             (user_id,),
         )
@@ -240,13 +268,15 @@ def build_subscription_dashboard(user_id: int, conn) -> dict:
         cur.close()
 
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for merchant, amount, tx_date, category, description in tx_rows:
+    for merchant, amount, tx_date, category, description, institution, source_type in tx_rows:
         grouped[str(merchant).strip()].append(
             {
                 "amount": float(amount or 0),
                 "date": tx_date,
                 "category": category or "",
                 "description": description or "",
+                "institution": institution or "",
+                "source_type": source_type or "",
             }
         )
 
@@ -262,7 +292,9 @@ def build_subscription_dashboard(user_id: int, conn) -> dict:
 
         med_amount = float(median(amounts))
         monthly_cost = med_amount if cycle == "MONTHLY" else med_amount / 12.0
-        usage_score, last_used_days = _usage_for_subscription(conn, user_id, merchant, category)
+        institution = items[-1].get("institution", "") if items else ""
+        source_type = items[-1].get("source_type", "") if items else ""
+        usage_score, last_used_days = _usage_for_subscription(conn, user_id, merchant, category, scope)
         mlow = merchant.lower()
         if "spotify" in mlow:
             usage_score = max(usage_score, 72)
@@ -299,6 +331,8 @@ def build_subscription_dashboard(user_id: int, conn) -> dict:
                 "first_charged": items[0]["date"].isoformat(),
                 "last_charged": items[-1]["date"].isoformat(),
                 "insight": _insight_for_status(status, last_used_days),
+                "source_name": _source_label(institution, source_type),
+                "source_type": source_type,
             }
         )
 

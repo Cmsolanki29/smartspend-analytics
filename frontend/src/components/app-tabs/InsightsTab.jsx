@@ -86,6 +86,26 @@ export default function InsightsTab({ userId, month, year, setActiveTab }) {
     };
   }, [userId, month, year]);
 
+  const refetchAll = useCallback(() => {
+    setHealthLoading(true);
+    setHealthError(false);
+    getHealthScore(userId, month, year)
+      .then((h) => setHealth(h))
+      .catch(() => setHealthError(true))
+      .finally(() => setHealthLoading(false));
+    setSummaryLoading(true);
+    getQuickSummary(userId, { month, year })
+      .then((s) => setSummary(s))
+      .catch(() => setSummary(null))
+      .finally(() => setSummaryLoading(false));
+  }, [userId, month, year]);
+
+  useEffect(() => {
+    const handler = () => refetchAll();
+    window.addEventListener("dashboardModeChanged", handler);
+    return () => window.removeEventListener("dashboardModeChanged", handler);
+  }, [refetchAll]);
+
   const savingsRate =
     summary?.savings_rate ?? health?.savings_rate ?? health?.components?.savings_rate_pct ?? null;
   const scoreReady = !healthLoading && !healthError && health != null;

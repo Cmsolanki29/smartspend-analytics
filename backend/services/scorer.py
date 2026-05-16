@@ -6,6 +6,7 @@ from datetime import date
 from typing import Any
 
 from models.schemas import HealthScoreResponse
+from services.dashboard_scope import fetch_dashboard_mode, transaction_scope_sql
 
 
 def _month_key(y: int, m: int) -> int:
@@ -34,6 +35,9 @@ def _grade(score: int) -> str:
 def calculate_health_score(conn, user_id: int, month: int, year: int) -> HealthScoreResponse:
     cur = conn.cursor()
     try:
+        mode = fetch_dashboard_mode(cur, user_id)
+        scope = transaction_scope_sql("t", mode)
+
         cur.execute(
             """
             SELECT total_income, total_expense, savings_rate, anomaly_count, COALESCE(health_score, 0)
@@ -47,14 +51,15 @@ def calculate_health_score(conn, user_id: int, month: int, year: int) -> HealthS
         # used to return the wrong component shape — all bars showed 0/30).
         if not row:
             cur.execute(
-                """
+                f"""
                 SELECT
-                    COALESCE(SUM(CASE WHEN type = 'CREDIT' THEN amount ELSE 0 END), 0)::float,
-                    COALESCE(SUM(CASE WHEN type = 'DEBIT' THEN amount ELSE 0 END), 0)::float
-                FROM transactions
-                WHERE user_id = %s
-                  AND EXTRACT(MONTH FROM transaction_date)::int = %s
-                  AND EXTRACT(YEAR FROM transaction_date)::int = %s;
+                    COALESCE(SUM(CASE WHEN t.type = 'CREDIT' THEN t.amount ELSE 0 END), 0)::float,
+                    COALESCE(SUM(CASE WHEN t.type = 'DEBIT' THEN t.amount ELSE 0 END), 0)::float
+                FROM transactions t
+                WHERE t.user_id = %s
+                  AND EXTRACT(MONTH FROM t.transaction_date)::int = %s
+                  AND EXTRACT(YEAR FROM t.transaction_date)::int = %s
+                  AND ({scope});
                 """,
                 (user_id, month, year),
             )
@@ -65,11 +70,12 @@ def calculate_health_score(conn, user_id: int, month: int, year: int) -> HealthS
                 round((total_income - total_expense) / total_income * 100, 2) if total_income > 0 else 0.0
             )
             cur.execute(
-                """
-                SELECT COUNT(*) FROM transactions
-                WHERE user_id = %s AND anomaly_flag = TRUE
-                  AND EXTRACT(MONTH FROM transaction_date)::int = %s
-                  AND EXTRACT(YEAR FROM transaction_date)::int = %s;
+                f"""
+                SELECT COUNT(*) FROM transactions t
+                WHERE t.user_id = %s AND t.anomaly_flag = TRUE
+                  AND EXTRACT(MONTH FROM t.transaction_date)::int = %s
+                  AND EXTRACT(YEAR FROM t.transaction_date)::int = %s
+                  AND ({scope});
                 """,
                 (user_id, month, year),
             )
@@ -140,11 +146,12 @@ def calculate_health_score(conn, user_id: int, month: int, year: int) -> HealthS
             consistency_points = 0
 
         cur.execute(
-            """
-            SELECT COUNT(DISTINCT category) FROM transactions
-            WHERE user_id = %s AND type = 'DEBIT'
-              AND EXTRACT(MONTH FROM transaction_date)::int = %s
-              AND EXTRACT(YEAR FROM transaction_date)::int = %s;
+            f"""
+            SELECT COUNT(DISTINCT t.category) FROM transactions t
+            WHERE t.user_id = %s AND t.type = 'DEBIT'
+              AND EXTRACT(MONTH FROM t.transaction_date)::int = %s
+              AND EXTRACT(YEAR FROM t.transaction_date)::int = %s
+              AND ({scope});
             """,
             (user_id, month, year),
         )
