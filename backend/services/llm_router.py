@@ -147,22 +147,31 @@ If none: []"""
 
     def understand_document(self, text_sample: str) -> dict[str, Any]:
         prompt = f"""Analyze this financial document and extract metadata.
+IMPORTANT: Extract institution_name ONLY from the document text itself.
+Do NOT guess or infer the bank from any other context.
+If you cannot find the bank name clearly in the text, return null.
 
 DOCUMENT:
 {text_sample[:5000]}
 
 Return ONLY JSON:
 {{
-    "document_type": "bank_statement | credit_card_statement | credit_card_bill | loan_statement | other",
-    "institution_name": "bank or card name",
-    "account_type": "savings | current | credit_card | loan",
-    "account_number_masked": null,
-    "statement_period": "date range",
-    "estimated_transaction_count": null,
-    "total_due": null,
+    "document_type": "bank_statement|credit_card_statement|loan_statement|transfer_receipt|unknown",
+    "institution_name": "exact name from document text only, e.g. ICICI Bank, HDFC Bank, SBI — null if not found",
+    "account_type": "savings|current|credit_card|loan|unknown",
+    "account_number_masked": "last 4 digits only e.g. XXXX4812 or null",
+    "account_holder_name": "full name exactly as printed in document or null",
+    "statement_period": "date range as written in document or null",
+    "currency": "INR",
+    "opening_balance": null,
+    "closing_balance": null,
     "total_debits": null,
-    "total_credits": null
-}}"""
+    "total_credits": null,
+    "total_due": null,
+    "estimated_transaction_count": 0
+}}
+
+Extract ONLY what is explicitly written in the document. Return null for anything not clearly visible."""
 
         raw = self._call_with_fallback(
             prompt=prompt,
@@ -172,7 +181,18 @@ Return ONLY JSON:
             max_tokens=2000,
             temperature=0.0,
         )
-        return self._safe_parse_json_dict(raw)
+        result = self._safe_parse_json_dict(raw)
+        for key in ("institution_name", "account_holder_name", "statement_period"):
+            val = result.get(key)
+            if isinstance(val, str) and val.strip().lower() in ("", "null", "none", "unknown", "n/a"):
+                result[key] = None
+        logger.info(
+            "[document_understanding] institution_name=%r account_holder_name=%r document_type=%r",
+            result.get("institution_name"),
+            result.get("account_holder_name"),
+            result.get("document_type"),
+        )
+        return result
 
     def validate_extraction(
         self,

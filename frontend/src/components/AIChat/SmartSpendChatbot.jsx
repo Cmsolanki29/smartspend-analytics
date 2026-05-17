@@ -451,39 +451,25 @@ export default function SmartSpendChatbot({ onNavigate, month, year, dashboardSc
       if (!res.ok) throw new Error(`Upload ${res.status}`);
       const result = await res.json();
       setUploadBanner({ state: "done", ...result });
-      if (result.uploaded_doc_metadata) {
-        setUploadedDocMeta(result.uploaded_doc_metadata);
+      if (result.doc_info || result.uploaded_doc_metadata) {
+        setUploadedDocMeta({
+          ...(result.uploaded_doc_metadata || {}),
+          ...(result.doc_info || {}),
+          identity_scope: result.identity_scope,
+          identity_reason: result.reason,
+        });
       }
-      const noticeParts = [];
-      if (result.warning_message) noticeParts.push(result.warning_message);
-      if (result.nudge_message) noticeParts.push(result.nudge_message);
-      const hp = result.health_preview;
-      if (hp?.transaction_count) {
-        noticeParts.push(
-          `Quick snapshot: ${hp.transaction_count} transactions · debits ₹${Number(hp.total_debits || 0).toLocaleString("en-IN")} · credits ₹${Number(hp.total_credits || 0).toLocaleString("en-IN")} · net ₹${Number(hp.net || 0).toLocaleString("en-IN")}.`
-        );
-      }
-      if (result.session_only) {
-        noticeParts.push("These figures are for this chat session only — connect the account to save them permanently.");
-      }
-      if (noticeParts.length) {
+      if (result.warning_message) {
         setMessages((prev) => [
           ...prev,
           {
             id: `sys-${Date.now()}`,
             role: "system",
-            content: noticeParts.join("\n\n"),
+            content: result.warning_message,
             timestamp: Date.now(),
           },
         ]);
       }
-      const prompt =
-        `I uploaded a document from ${result.institution || result.doc_info?.institution_name || "a financial institution"}: ${file.name}. ` +
-        `It appears to be a ${result.document_type || result.doc_info?.document_type || "financial document"} with ${result.transaction_count || 0} transactions. ` +
-        `${result.date_range ? `Period: ${result.date_range}. ` : ""}` +
-        `Please summarize what stands out and what I should review first.`;
-      setMessages((prev) => [...prev, { id: `u-doc-${Date.now()}`, role: "user", content: prompt, timestamp: Date.now() }]);
-      await doSend(prompt, sessionId);
     } catch {
       setUploadBanner({ state: "error" });
       setMessages((prev) => [

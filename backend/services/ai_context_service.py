@@ -9,7 +9,9 @@ from __future__ import annotations
 import calendar
 import json
 import logging
+import re
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from db import get_connection
@@ -67,14 +69,201 @@ def _fetch_connected_sources(cur, user_id: int) -> list[dict[str, Any]]:
         return []
 
 
-def resolve_identity_scope(
-    user_id: int,
-    uploaded_doc_metadata: dict | None,
-    connected_sources: list[dict],
+# Indian bank tokens — scored from document text (not from user profile).
+_BANK_TEXT_SIGNALS: list[tuple[str, str, int]] = [
+    (r"\bicici\s*bank\b", "ICICI Bank", 4),
+    (r"\bicici\b", "ICICI Bank", 3),
+    (r"\bhdfc\s*bank\b", "HDFC Bank", 4),
+    (r"\bhdfc\b", "HDFC Bank", 3),
+    (r"\bstate\s*bank\s*of\s*india\b", "State Bank of India", 4),
+    (r"\bsbi\b", "State Bank of India", 2),
+    (r"\baxis\s*bank\b", "Axis Bank", 4),
+    (r"\baxis\b", "Axis Bank", 2),
+    (r"\bkotak\b", "Kotak Mahindra Bank", 3),
+    (r"\byes\s*bank\b", "Yes Bank", 3),
+    (r"\bpunjab\s*national\b", "Punjab National Bank", 3),
+    (r"\bcanara\s*bank\b", "Canara Bank", 3),
+]
+
+_HOLDER_TEXT_PATTERNS = [
+    r"(?:account\s*holder|customer\s*name|name\s*of\s*account\s*holder|holder\s*name)"
+    r"\s*[:\-]\s*([A-Za-z][A-Za-z\s.'-]{2,60})",
+    r"(?:dear|mr\.?|mrs\.?|ms\.?|shri\.?|smt\.?)\s+([A-Za-z][A-Za-z\s.'-]{2,60})",
+]
+
+_FILENAME_SKIP_TOKENS = frozenset({
+    "icici", "hdfc", "sbi", "axis", "kotak", "yes", "bank", "emi", "account",
+    "statement", "loan", "credit", "card", "apr", "may", "jun", "jul", "aug",
+    "sep", "oct", "nov", "dec", "jan", "feb", "mar", "pdf", "csv", "txt",
+    "sample", "realistic", "fixed", "gen", "genz", "neo", "magnus", "ace",
+})
+
+
+def _bank_canonical_key(name: str | None) -> str | None:
+    if not name:
+        return None
+    low = name.lower()
+    for key in ("icici", "hdfc", "sbi", "axis", "kotak", "yes", "pnb", "canara"):
+        if key in low:
+            return key
+    return None
+
+
+def detect_institution_in_text(text: str) -> str | None:
+    """Pick the bank most strongly mentioned in raw document text."""
+    if not text or len(text.strip()) < 8:
+        return None
+    scores: dict[str, int] = {}
+    for pattern, label, weight in _BANK_TEXT_SIGNALS:
+        for _ in re.finditer(pattern, text, re.IGNORECASE):
+            scores[label] = scores.get(label, 0) + weight
+    if not scores:
+        return None
+    best_label, best_score = max(scores.items(), key=lambda x: x[1])
+    if best_score < 2:
+        return None
+    return best_label
+
+
+def detect_holder_in_text(text: str) -> str | None:
+    if not text:
+        return None
+    for pattern in _HOLDER_TEXT_PATTERNS:
+        m = re.search(pattern, text, re.IGNORECASE)
+        if m:
+            name = m.group(1).strip()
+            if len(name) >= 3 and not name.lower().startswith("icici"):
+                return name.title()
+    return None
+
+
+def detect_institution_in_filename(filename: str) -> str | None:
+    """Weak fallback when body text has no bank string — filename token only, not user profile."""
+    if not filename:
+        return None
+    low = filename.lower()
+    for key, label in (
+        ("icici", "ICICI Bank"),
+        ("hdfc", "HDFC Bank"),
+        ("axis", "Axis Bank"),
+        ("kotak", "Kotak Mahindra Bank"),
+        ("sbi", "State Bank of India"),
+        ("yesbank", "Yes Bank"),
+        ("yes_bank", "Yes Bank"),
+    ):
+        if key in low.replace("-", "_"):
+            return label
+    return None
+
+
+def detect_holder_in_filename(filename: str) -> str | None:
+    """First name-like token in filename (e.g. RAHUL_ICICI_EMI → Rahul). Bank names excluded."""
+    if not filename:
+        return None
+    stem = Path(filename).stem
+    for part in re.split(r"[_\-\s]+", stem):
+        token = part.strip()
+        if len(token) < 3 or not token.isalpha():
+            continue
+        low = token.lower()
+        if low in _FILENAME_SKIP_TOKENS:
+            continue
+        return token.title()
+    return None
+
+
+def enrich_doc_info_from_text(
+    doc_info: dict[str, Any],
+    raw_text: str,
+    filename: str = "",
 ) -> dict[str, Any]:
     """
-    Determines data scope and relationship of an uploaded document to this user.
+    Correct LLM metadata using deterministic signals from document body + filename holder hint.
+    Institution always prefers explicit mentions in raw_text over LLM guesses.
     """
+    info = dict(doc_info or {})
+    text_inst = detect_institution_in_text(raw_text)
+    llm_inst = (info.get("institution_name") or "").strip() or None
+
+    fn_inst = detect_institution_in_filename(filename)
+
+    if text_inst:
+        llm_key = _bank_canonical_key(llm_inst)
+        text_key = _bank_canonical_key(text_inst)
+        if not llm_inst or (llm_key and text_key and llm_key != text_key):
+            if llm_inst and llm_key != text_key:
+                _log.warning(
+                    "Overriding LLM institution %r → %r (from document text)",
+                    llm_inst,
+                    text_inst,
+                )
+            info["institution_name"] = text_inst
+    elif fn_inst:
+        if llm_inst and _bank_canonical_key(llm_inst) != _bank_canonical_key(fn_inst):
+            _log.warning(
+                "Overriding LLM institution %r → %r (from filename token; no bank in text)",
+                llm_inst,
+                fn_inst,
+            )
+        info["institution_name"] = fn_inst
+    elif llm_inst:
+        info["institution_name"] = llm_inst
+
+    holder = (info.get("account_holder_name") or "").strip() or None
+    if not holder:
+        holder = detect_holder_in_text(raw_text)
+    if not holder:
+        holder = detect_holder_in_filename(filename)
+    if holder:
+        info["account_holder_name"] = holder
+
+    _log.info(
+        "enrich_doc_info: institution=%r holder=%r (filename=%r)",
+        info.get("institution_name"),
+        info.get("account_holder_name"),
+        filename[:80] if filename else "",
+    )
+    return info
+
+
+def _names_likely_match(doc_name: str | None, user_name: str | None) -> bool:
+    """
+    True = same person or cannot determine (permissive).
+    False = clearly different person.
+    """
+    if not doc_name or not user_name:
+        return True
+
+    doc_clean = doc_name.strip().lower()
+    user_clean = user_name.strip().lower()
+
+    if doc_clean == user_clean:
+        return True
+
+    if not doc_clean.isascii():
+        return True
+
+    stop = {"mr", "mrs", "ms", "dr", "shri", "smt"}
+    doc_words = set(doc_clean.split()) - stop
+    user_words = set(user_clean.split()) - stop
+
+    if doc_words & user_words:
+        return True
+
+    doc_initials = "".join(w[0] for w in doc_clean.split() if w)
+    user_initials = "".join(w[0] for w in user_clean.split() if w)
+    if doc_initials == user_initials and len(doc_initials) >= 2:
+        return True
+
+    return False
+
+
+def resolve_identity_scope(
+    user_id: int,
+    doc_info: dict | None,
+    connected_sources: list[dict],
+) -> dict[str, Any]:
+    """Determines data scope and relationship of an uploaded document to this user."""
     user_name = get_user_name(user_id)
     linked_bank_names = [
         s["institution_name"]
@@ -82,65 +271,95 @@ def resolve_identity_scope(
         if s.get("institution_name")
     ]
 
-    if not uploaded_doc_metadata:
+    if not doc_info:
         return {
             "scope": "no_upload",
+            "reason": None,
             "warning_message": None,
             "nudge_message": None,
             "linked_bank_names": linked_bank_names,
             "user_name": user_name,
         }
 
-    doc_bank = (uploaded_doc_metadata.get("institution_name") or "").lower()
-    institution_label = uploaded_doc_metadata.get("institution_name") or "this bank"
-    is_doc_linked = bool(uploaded_doc_metadata.get("is_linked_account"))
+    doc_holder = doc_info.get("account_holder_name")
+    if isinstance(doc_holder, str):
+        doc_holder = doc_holder.strip() or None
+    doc_bank = (doc_info.get("institution_name") or "").strip()
+    doc_bank_label = doc_bank or "this bank"
 
-    bank_name_match = bool(
-        doc_bank
+    name_matches = _names_likely_match(doc_holder, user_name)
+    _log.info(
+        "Identity check: user=%s, doc_holder=%s → %s",
+        user_name,
+        doc_holder or "(not in document)",
+        "MATCH" if name_matches else "MISMATCH",
+    )
+
+    if not name_matches:
+        holder_label = doc_holder or "another person"
+        scope = {
+            "scope": "unlinked_foreign",
+            "reason": "different_person",
+            "warning_message": (
+                f"This statement appears to belong to a different account holder "
+                f"({holder_label}), not {user_name}. "
+                f"I can only fully analyze your own financial documents. "
+                f"I will share a quick health overview from this statement."
+            ),
+            "nudge_message": None,
+            "linked_bank_names": linked_bank_names,
+            "user_name": user_name,
+        }
+        _log.info(
+            "resolve_identity_scope: scope=%s reason=%s",
+            scope["scope"],
+            scope["reason"],
+        )
+        return scope
+
+    doc_bank_lower = doc_bank.lower()
+    is_bank_linked = bool(
+        doc_bank_lower
+        and doc_bank_lower not in ("unknown",)
         and any(
-            doc_bank in (s.get("institution_name") or "").lower()
-            or (s.get("institution_name") or "").lower() in doc_bank
-            for s in connected_sources
+            doc_bank_lower in (name or "").lower() or (name or "").lower() in doc_bank_lower
+            for name in linked_bank_names
         )
     )
 
-    if is_doc_linked:
-        return {
-            "scope": "linked_full",
-            "warning_message": None,
-            "nudge_message": None,
+    if is_bank_linked:
+        scope = {
+            "scope": "unlinked_same_bank",
+            "reason": "same_bank_not_connected",
+            "warning_message": (
+                f"This looks like your {doc_bank_label} statement, but this account "
+                f"is not connected to SmartSpend. "
+                f"I can provide a summary for this session. "
+                f"To track it permanently, go to Settings — Connect Account."
+            ),
+            "nudge_message": "Connect this account for full tracking and trends.",
             "linked_bank_names": linked_bank_names,
             "user_name": user_name,
         }
+        _log.info("resolve_identity_scope: scope=%s reason=%s", scope["scope"], scope["reason"])
+        return scope
 
-    if bank_name_match:
-        warning = (
-            f"Hi {user_name}! This looks like your {institution_label} statement, "
-            "but it's not connected to your account. I can give you a summary — "
-            "connect it in the Accounts section for full tracking."
-        )
-        nudge = (
-            "Connect this account in Settings → Connected Accounts for permanent "
-            "tracking and trends."
-        )
-        scope = "unlinked_same_bank"
-    else:
-        linked_str = ", ".join(linked_bank_names) if linked_bank_names else "none yet"
-        warning = (
-            f"Hi {user_name}! This appears to be a {institution_label} statement. "
+    linked_str = ", ".join(linked_bank_names) if linked_bank_names else "none connected yet"
+    scope = {
+        "scope": "unlinked_foreign",
+        "reason": "different_bank",
+        "warning_message": (
+            f"This is a {doc_bank_label} statement. "
             f"Your linked accounts are: {linked_str}. "
-            "I'll share a health snapshot, but for full insights this account needs to be connected."
-        )
-        nudge = "To track this account permanently, go to Connect Account section."
-        scope = "unlinked_foreign"
-
-    return {
-        "scope": scope,
-        "warning_message": warning,
-        "nudge_message": nudge,
+            f"I will share a health snapshot for this session. "
+            f"To track this account, connect it in Settings — Connect Account."
+        ),
+        "nudge_message": "Go to Connect Account to add this bank.",
         "linked_bank_names": linked_bank_names,
         "user_name": user_name,
     }
+    _log.info("resolve_identity_scope: scope=%s reason=%s", scope["scope"], scope["reason"])
+    return scope
 
 
 def extract_all_amounts_from_context(context_packet: dict) -> list[float]:
@@ -296,14 +515,32 @@ def merge_session_upload_into_packet(packet: dict[str, Any], session_id: str | N
     scope = identity.get("scope", "no_upload")
     doc_info = ctx.get("doc_info") or {}
 
+    identity_reason = identity.get("reason")
     packet["session_upload"] = {
         "doc_info": doc_info,
         "identity_scope": scope,
+        "identity_reason": identity_reason,
         "transaction_count": len(txns),
         "health_preview": ctx.get("health_preview"),
         "extracted_at": ctx.get("extracted_at"),
         "transactions": txns[:100],
+        "instruction": (
+            "Use ONLY this block for questions about the file just uploaded in chat. "
+            "Do not describe linked_accounts or older uploaded_documents as this upload."
+        ),
     }
+
+    # Prevent the model from conflating past DB uploads (e.g. HDFC) with the current session file.
+    packet["uploaded_documents"] = [
+        {
+            "file": "current_chat_session_upload",
+            "type": doc_info.get("document_type"),
+            "institution": doc_info.get("institution_name"),
+            "account_holder_name": doc_info.get("account_holder_name"),
+            "is_current_session": True,
+            "transaction_count": len(txns),
+        }
+    ]
 
     if txns:
         session_txn_view = [

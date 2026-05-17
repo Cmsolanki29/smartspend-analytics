@@ -31,6 +31,7 @@ from db import get_connection
 from utils.auth import get_current_user_id
 from services.ai_context_service import (
     calculate_quick_health,
+    enrich_doc_info_from_text,
     extract_all_amounts_from_context,
     get_or_build_context_packet,
     get_user_name,
@@ -385,6 +386,7 @@ def _run_llm_router_extraction(
 
     raw_text = raw_text[:_MAX_RAW_TEXT_CHARS]
     doc_info = router.understand_document(raw_text[:5000])
+    doc_info = enrich_doc_info_from_text(doc_info, raw_text, filename)
 
     chunks = [
         raw_text[i : i + _UPLOAD_CHUNK_SIZE]
@@ -600,6 +602,47 @@ def _stream_llm(messages: list[dict], system_prompt: str) -> Generator[str, None
     yield f"data: {json.dumps({'done': True, 'full': offline})}\n\n"
 
 
+def _session_upload_chat_block(context: dict[str, Any], identity_scope: dict[str, Any]) -> str:
+    """Explicit upload facts so the model does not confuse linked HDFC data with this file."""
+    su = context.get("session_upload") or {}
+    if not su.get("doc_info"):
+        return ""
+    doc = su["doc_info"]
+    hp = su.get("health_preview") or {}
+    scope = identity_scope.get("scope") or su.get("identity_scope")
+    reason = identity_scope.get("reason") or su.get("identity_reason")
+    lines = [
+        "",
+        "═══ CURRENT CHAT UPLOAD (mandatory for upload / health-score questions) ═══",
+        f"Institution extracted from THIS file: {doc.get('institution_name') or 'unknown'}",
+        f"Account holder on THIS file: {doc.get('account_holder_name') or 'not found'}",
+        f"Document type: {doc.get('document_type') or 'unknown'}",
+        f"Statement period: {doc.get('statement_period') or 'unknown'}",
+        f"Transactions extracted: {su.get('transaction_count', 0)}",
+        f"Identity scope: {scope} ({reason or 'n/a'})",
+    ]
+    if hp:
+        lines.append(
+            f"Upload health snapshot: debits ₹{hp.get('total_debits', 0):,.0f}, "
+            f"credits ₹{hp.get('total_credits', 0):,.0f}, net ₹{hp.get('net', 0):,.0f}, "
+            f"savings rate {hp.get('savings_rate_pct', 0)}%, "
+            f"{hp.get('transaction_count', 0)} transactions."
+        )
+    if scope == "unlinked_foreign" and reason == "different_person":
+        lines.append(
+            "RULE: Different account holder — give ONLY the upload health snapshot above. "
+            "Do NOT present linked-account dashboard income/expense as if it were this file."
+        )
+    elif scope in ("unlinked_foreign", "unlinked_same_bank"):
+        lines.append(
+            "RULE: This file is not the user's linked ledger — use upload snapshot only, not linked_accounts totals."
+        )
+    lines.append(
+        "Do NOT say this upload is from HDFC or any linked bank unless institution above matches."
+    )
+    return "\n".join(lines)
+
+
 def _resolve_refusal(gate: str, user_name: str) -> str:
     if gate == "jailbreak":
         return REFUSAL_JAILBREAK
@@ -683,7 +726,7 @@ def chat(
         ]
 
     # ── Context packet (cached per session) ───────────────────────────────
-    force_rebuild = bool(request.is_first_message)
+    force_rebuild = bool(request.is_first_message) or bool(upload_ctx and upload_ctx.get("doc_info"))
     context = get_or_build_context_packet(
         user_id,
         sid,
@@ -716,6 +759,10 @@ def chat(
         )
     else:
         user_content = f"CONTEXT PACKET:\n{context_json}\n\n---\n\nUser: {request.message}"
+
+    upload_block = _session_upload_chat_block(context, identity_scope)
+    if upload_block:
+        user_content += upload_block
 
     messages = history + [{"role": "user", "content": user_content}]
     _save_message(sid, "user", request.message)
@@ -786,16 +833,8 @@ async def upload_document(
 
     connected_sources = _fetch_connected_sources_list(user_id)
     institution = doc_info.get("institution_name") or "unknown"
-    institution_lower = institution.lower()
-    is_linked = bool(
-        institution_lower
-        and institution_lower != "unknown"
-        and any(
-            institution_lower in (s.get("institution_name") or "").lower()
-            or (s.get("institution_name") or "").lower() in institution_lower
-            for s in connected_sources
-        )
-    )
+    identity_scope = resolve_identity_scope(user_id, doc_info, connected_sources)
+    is_linked = identity_scope.get("scope") == "linked_full"
 
     doc_metadata = {
         "institution_name": institution,
@@ -804,8 +843,9 @@ async def upload_document(
         "document_type": doc_info.get("document_type"),
         "date_range": doc_info.get("statement_period"),
         "account_number_masked": doc_info.get("account_number_masked"),
+        "identity_scope": identity_scope.get("scope"),
+        "identity_reason": identity_scope.get("reason"),
     }
-    identity_scope = resolve_identity_scope(user_id, doc_metadata, connected_sources)
     health_preview = calculate_quick_health(all_transactions)
 
     sid = session_id or _get_or_create_session(user_id)
@@ -878,6 +918,7 @@ async def upload_document(
         "date_range": doc_info.get("statement_period"),
         "account_masked": doc_info.get("account_number_masked"),
         "identity_scope": identity_scope.get("scope"),
+        "reason": identity_scope.get("reason"),
         "identity_scope_detail": identity_scope,
         "warning_message": identity_scope.get("warning_message"),
         "nudge_message": identity_scope.get("nudge_message"),

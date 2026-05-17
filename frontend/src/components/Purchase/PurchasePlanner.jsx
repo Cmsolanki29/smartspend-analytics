@@ -3,6 +3,7 @@ import {
   deletePurchaseGoal,
   getPurchases,
   postPurchaseAddGoal,
+  postPurchasePostponeGoal,
   putPurchaseUpdateSavings,
 } from "../../services/api";
 import { useToast } from "../common/Toast";
@@ -10,10 +11,18 @@ import { EmptyState } from "../common/EmptyState";
 import { ErrorCard } from "../common/ErrorCard";
 import { SkeletonCard } from "../common/SkeletonCard";
 import { PageHeader } from "../Dashboard/shared/PageHeader";
-import { HeroKpiTile } from "../Dashboard/shared/HeroKpiTile";
 import { inr } from "../../lib/format";
 
 const ACCENT = "#38BDF8";
+
+function dispatchPlannerSync(userId) {
+  try {
+    window.dispatchEvent(new CustomEvent("smartspend:purchase-goals-changed", { detail: { userId } }));
+    window.dispatchEvent(new CustomEvent("smartspend-financial-sync", { detail: { userId } }));
+  } catch {
+    /* ignore */
+  }
+}
 
 const fmt = (n) =>
   new Intl.NumberFormat("en-IN", {
@@ -39,6 +48,10 @@ const PurchasePlanner = ({ userId }) => {
   const [savingId, setSavingId] = useState(null);
   const [saveInput, setSaveInput] = useState({});
   const [celebrate, setCelebrate] = useState(null);
+  const [expanded, setExpanded] = useState({});
+  const [postponeGoal, setPostponeGoal] = useState(null);
+  const [postponeMonths, setPostponeMonths] = useState("3");
+  const [postponing, setPostponing] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -99,6 +112,7 @@ const PurchasePlanner = ({ userId }) => {
       setTargetAmount("");
       setTargetDate("");
       await load();
+      dispatchPlannerSync(userId);
       showToast("Goal added successfully! ✅");
     } catch (e) {
       alert(e.message || "Could not add goal");
@@ -143,26 +157,82 @@ const PurchasePlanner = ({ userId }) => {
     }
   };
 
-  const onTrackCount  = goals.filter((g) => Number(g.progress_pct || 0) >= (Number(g.months_to_deadline || 1) > 0 ? 50 : 0)).length;
+  const onTrackCount = data?.goals_on_track ?? goals.filter((g) => g.on_track === true).length;
+  const goalsTotal = data?.goals_total ?? goals.length;
   const totalCommitted = goals.reduce((s, g) => s + Number(g.target_amount || 0), 0);
+  const maxMonthly = Math.max(
+    Number(data?.total_monthly_saving_needed || 0),
+    Number(data?.current_savings_rate_monthly || 0),
+    Number(data?.gap_monthly || 0),
+    1,
+  );
+
+  const toggleExpand = (id) => setExpanded((e) => ({ ...e, [id]: !e[id] }));
+
+  const handlePostpone = async () => {
+    if (!postponeGoal) return;
+    const n = parseInt(postponeMonths, 10);
+    if (!Number.isFinite(n) || n < 1 || n > 60) {
+      showToast("Enter months between 1 and 60");
+      return;
+    }
+    setPostponing(true);
+    try {
+      await postPurchasePostponeGoal(userId, postponeGoal.goal_id, n);
+      setPostponeGoal(null);
+      await load();
+      dispatchPlannerSync(userId);
+      showToast("Goal postponed — EMI & planners updated");
+    } catch (e) {
+      showToast(e.message || "Postpone failed");
+    } finally {
+      setPostponing(false);
+    }
+  };
 
   return (
     <div className="purchase-page fade-in">
       <PageHeader
         eyebrow="PURCHASE PLANNER"
         title="Goal-first Spending"
-        subtitle="Every purchase decision checked against your goals. Know before you buy, save before you splurge."
+        subtitle="Plan big purchases with savings pace, EMI vs cash, and sacrifice hints."
         accentHex={ACCENT}
-        rightSlot={
-          <HeroKpiTile
-            label="Goals on track"
-            value={loading ? "—" : String(onTrackCount)}
-            caption={`Total committed ${inr(totalCommitted)} across ${goals.length} goal${goals.length !== 1 ? "s" : ""}`}
-            accentHex={ACCENT}
-            loading={loading}
-          />
-        }
       />
+
+      <div className="planner-hero-actions">
+        <button type="button" className="btn-primary" onClick={() => setModal(true)}>
+          + Add new goal
+        </button>
+      </div>
+
+      {!loading && !err && (
+        <div className="planner-kpi-grid">
+          <div className="planner-kpi-card glass-card">
+            <div className="planner-kpi-label" style={{ color: ACCENT }}>Goals on track</div>
+            <div className="planner-kpi-value" style={{ color: ACCENT }}>
+              {onTrackCount}/{goalsTotal} {onTrackCount === goalsTotal && goalsTotal > 0 ? "✓" : ""}
+            </div>
+            <div className="planner-kpi-sub">Using savings pace vs target</div>
+          </div>
+          <div className="planner-kpi-card glass-card">
+            <div className="planner-kpi-label">Total committed</div>
+            <div className="planner-kpi-value">{inr(totalCommitted)}</div>
+            <div className="planner-kpi-sub">{goals.length} active goal{goals.length !== 1 ? "s" : ""}</div>
+          </div>
+          <div className="planner-kpi-card glass-card">
+            <div className="planner-kpi-label">Monthly needed</div>
+            <div className="planner-kpi-value">{inr(data?.total_monthly_saving_needed ?? 0)}</div>
+            <div className="planner-kpi-sub">Combined pace</div>
+          </div>
+          <div className="planner-kpi-card glass-card">
+            <div className="planner-kpi-label">Gap</div>
+            <div className="planner-kpi-value" style={{ color: (data?.gap_monthly || 0) > 500 ? "#f59e0b" : "#10b981" }}>
+              {inr(data?.gap_monthly ?? 0)}
+            </div>
+            <div className="planner-kpi-sub">vs avg savings /mo</div>
+          </div>
+        </div>
+      )}
 
       {celebrate && (
         <div className="purchase-confetti-wrap" aria-live="polite">
@@ -187,21 +257,35 @@ const PurchasePlanner = ({ userId }) => {
 
       {!loading && !err && goals.length > 1 && (
         <section className="glass-card purchase-priority-summary">
-          <h3>Monthly targets</h3>
-          {goals.map((g) => (
-            <div key={g.goal_id} className="purchase-pri-row">
-              <span>
-                {g.priority === "HIGH" ? "🔴" : g.priority === "MEDIUM" ? "🟡" : "🟢"} {g.priority}: {g.item_name}
-              </span>
-              <strong>{fmt(g.monthly_target)}/mo</strong>
+          <h3>📊 Monthly targets</h3>
+          <div className="planner-outlook-bars">
+            {goals.map((g) => (
+              <div key={g.goal_id} className="planner-outlook-row">
+                <span>{g.item_name}</span>
+                <div className="planner-outlook-bar">
+                  <span style={{ width: `${(100 * g.monthly_target) / maxMonthly}%`, background: ACCENT }} />
+                </div>
+                <strong>{fmt(g.monthly_target)}/mo</strong>
+              </div>
+            ))}
+            <div className="planner-outlook-row">
+              <span>Total</span>
+              <div className="planner-outlook-bar">
+                <span style={{ width: `${(100 * (data?.total_monthly_saving_needed || 0)) / maxMonthly}%`, background: "#818cf8" }} />
+              </div>
+              <strong>{fmt(data?.total_monthly_saving_needed)}/mo</strong>
             </div>
-          ))}
-          <p>
-            Total needed: {fmt(data?.total_monthly_saving_needed)}/mo · You save ~{fmt(data?.current_savings_rate_monthly)}
-            /mo · Gap {fmt(data?.gap_monthly)}
-          </p>
+            <div className="planner-outlook-row">
+              <span>You save</span>
+              <div className="planner-outlook-bar">
+                <span style={{ width: `${(100 * (data?.current_savings_rate_monthly || 0)) / maxMonthly}%`, background: "#10b981" }} />
+              </div>
+              <strong>~{fmt(data?.current_savings_rate_monthly)}/mo</strong>
+            </div>
+          </div>
         </section>
       )}
+
 
       {!loading && !err && goals.length === 0 && (
         <div className="glass-card purchase-empty feature-card">
@@ -218,229 +302,146 @@ const PurchasePlanner = ({ userId }) => {
         </div>
       )}
 
-      <div className="purchase-grid">
+      <div className="planner-grid-v2">
         {!loading &&
           !err &&
-          goals.map((g) => (
-            <article key={g.goal_id} className="glass-card purchase-card">
-              <header className="purchase-card-head">
-                <div>
-                  <h3>
-                    🛒 {g.item_name}{" "}
-                    <span className="purchase-pri">{g.priority === "HIGH" ? "HIGH 🔴" : g.priority}</span>
-                  </h3>
-                  <p className="muted small">
-                    Target {fmt(g.target_amount)} · by {g.target_date}
+          goals.map((g) => {
+            const isOpen = !!expanded[g.goal_id];
+            const icon =
+              g.category === "VEHICLE" ? "🛵" : g.category === "ELECTRONICS" ? "💻" : g.category === "APPLIANCE" ? "❄️" : "🛒";
+            return (
+              <article key={g.goal_id} className={`glass-card planner-card-v2 ${isOpen ? "is-expanded" : ""}`}>
+                {g.festival_link?.label && (
+                  <div className="planner-link-banner">
+                    🔗 Festival link: {g.festival_link.label}
+                  </div>
+                )}
+                <header
+                  className="planner-card-head-v2"
+                  onClick={() => toggleExpand(g.goal_id)}
+                  onKeyDown={(e) => e.key === "Enter" && toggleExpand(g.goal_id)}
+                  role="button"
+                  tabIndex={0}
+                >
+                  <div>
+                    <h3>
+                      {icon} {g.item_name}{" "}
+                      <span className="purchase-pri">{g.priority === "HIGH" ? "HIGH" : g.priority}</span>
+                    </h3>
+                    <p className="muted small">
+                      Target {fmt(g.target_amount)} · by {g.target_date} · {g.months_remaining} months
+                    </p>
+                  </div>
+                  <span style={{ color: g.on_track ? "#10b981" : "#f59e0b", fontSize: 12, fontWeight: 600 }}>
+                    {g.on_track ? "✅ On track" : `Gap ${fmt(g.gap_per_month)}/mo`}
+                  </span>
+                </header>
+                <div className="planner-progress-wrap">
+                  <div className="planner-progress-bar">
+                    <span className="planner-progress-fill purchase" style={{ width: `${Math.min(100, g.progress_pct)}%` }} />
+                  </div>
+                  <p className="muted small" style={{ marginTop: 6 }}>
+                    {fmt(g.saved_amount)} of {fmt(g.target_amount)} ({g.progress_pct}%)
                   </p>
                 </div>
-              </header>
-
-              <div className="purchase-progress">
-                <div className="purchase-progress-bar" style={{ width: "100%" }}>
-                  <span
-                    className="purchase-progress-fill"
-                    style={{ width: `${Math.min(100, g.progress_pct)}%` }}
-                  />
+                <div className="planner-card-metrics">
+                  <span>Save {fmt(g.monthly_target)}/mo</span>
+                  <span>🏷️ {g.best_buy_month?.month}</span>
                 </div>
-                <p>
-                  {fmt(g.saved_amount)} saved of {fmt(g.target_amount)} ({g.progress_pct}%)
-                </p>
-              </div>
-
-              <p>
-                📅 {g.months_remaining} months left · 💰 Save {fmt(g.monthly_target)}/mo
-                {g.on_track ? " · ✅ On track" : " · ⚠️ Gap " + fmt(g.gap_per_month) + "/mo"}
-              </p>
-
-              <div className="purchase-best-buy">
-                <strong>🏷️ Best time to buy</strong>
-                <p>{g.best_buy_month?.month}</p>
-                <p className="muted small">{g.best_buy_month?.reason}</p>
-                <p>Effective ~{fmt(g.best_buy_month?.effective_cost)} after typical discount</p>
-              </div>
-
-              <div className="purchase-emi">
-                <strong>💳 EMI vs 💵 cash</strong>
-                <p>Cash total {fmt(g.emi_vs_cash?.cash?.total)} — interest {fmt(g.emi_vs_cash?.cash?.interest)}</p>
-                <p>
-                  EMI 12m: {fmt(g.emi_vs_cash?.emi_12?.monthly)}/mo · total {fmt(g.emi_vs_cash?.emi_12?.total)}
-                </p>
-                <p>
-                  EMI 24m: {fmt(g.emi_vs_cash?.emi_24?.monthly)}/mo · total {fmt(g.emi_vs_cash?.emi_24?.total)}
-                </p>
-              </div>
-
-              <div className="purchase-sac">
-                <strong>✂️ Suggested cuts (from your real spending)</strong>
-                <ul className="card-list">
-                  {(g.sacrifice_plan || []).map((s, i) => (
-                    <li key={i}>
-                      {s.category}: cut ~{fmt(s.suggested_cut)}/mo (was {fmt(s.current_spend)}) — {s.impact}
-                    </li>
-                  ))}
-                  {(!g.sacrifice_plan || g.sacrifice_plan.length === 0) && (
-                    <li className="muted">Not enough category history — keep logging transactions.</li>
-                  )}
-                </ul>
-              </div>
-
-              {g.ai_advice && (
-                <blockquote className="purchase-ai feature-card">
-                  <strong>🤖 AI</strong>
-                  <p>{g.ai_advice}</p>
-                </blockquote>
-              )}
-
-              {/* Milestones Timeline */}
-              <div style={{ marginTop: "20px" }}>
-                <h4
-                  style={{
-                    color: "#94a3b8",
-                    fontSize: "13px",
-                    marginBottom: "12px",
-                    textTransform: "uppercase",
-                    letterSpacing: "0.5px",
-                  }}
-                >
-                  Savings Milestones
-                </h4>
-
-                <div
-                  style={{
-                    overflowX: "auto",
-                    paddingBottom: "8px",
-                  }}
-                >
-                  <div
-                    style={{
-                      display: "flex",
-                      alignItems: "flex-start",
-                      gap: "0px",
-                      minWidth: "fit-content",
-                      position: "relative",
-                      padding: "0 8px",
-                    }}
-                  >
-                    {g.milestones && g.milestones.length > 0 && (
-                      <div
-                        style={{
-                          position: "absolute",
-                          top: "16px",
-                          left: "28px",
-                          right: "28px",
-                          height: "2px",
-                          background: "linear-gradient(90deg, #3b82f6, #8b5cf6)",
-                          zIndex: 0,
-                        }}
-                      />
-                    )}
-
-                    {g.milestones &&
-                      g.milestones.map((milestone, index) => (
-                        <div
-                          key={index}
-                          style={{
-                            display: "flex",
-                            flexDirection: "column",
-                            alignItems: "center",
-                            flex: "1",
-                            minWidth: "90px",
-                            maxWidth: "110px",
-                            position: "relative",
-                            zIndex: 1,
-                          }}
-                        >
-                          <div
-                            style={{
-                              width: "32px",
-                              height: "32px",
-                              borderRadius: "50%",
-                              background:
-                                index === g.milestones.length - 1
-                                  ? "linear-gradient(135deg, #f97316, #ef4444)"
-                                  : "#3b82f6",
-                              display: "flex",
-                              alignItems: "center",
-                              justifyContent: "center",
-                              fontSize: "14px",
-                              border: "2px solid #1e293b",
-                              flexShrink: 0,
-                            }}
-                          >
-                            {index === g.milestones.length - 1 ? "🎯" : "●"}
-                          </div>
-
-                          <div
-                            style={{
-                              fontSize: "11px",
-                              color: "#94a3b8",
-                              marginTop: "6px",
-                              textAlign: "center",
-                              lineHeight: "1.3",
-                              whiteSpace: "nowrap",
-                            }}
-                          >
-                            {milestone.month?.split(" ")[0] || `Month ${index + 1}`}
-                          </div>
-
-                          <div
-                            style={{
-                              fontSize: "12px",
-                              fontWeight: "700",
-                              color: index === g.milestones.length - 1 ? "#f97316" : "#f1f5f9",
-                              marginTop: "2px",
-                              textAlign: "center",
-                              whiteSpace: "nowrap",
-                            }}
-                          >
-                            ₹{(milestone.amount / 1000).toFixed(0)}k
-                          </div>
-
-                          <div
-                            style={{
-                              fontSize: "10px",
-                              color: index === g.milestones.length - 1 ? "#f97316" : "#64748b",
-                              textAlign: "center",
-                              marginTop: "2px",
-                              maxWidth: "80px",
-                              lineHeight: "1.2",
-                            }}
-                          >
-                            {milestone.label}
-                          </div>
-                        </div>
-                      ))}
+                <div className="planner-card-actions-v2">
+                  <div className="planner-log-savings">
+                    <input
+                      type="number"
+                      min="0"
+                      placeholder="₹ amount"
+                      value={saveInput[g.goal_id] || ""}
+                      onChange={(e) => setSaveInput((s) => ({ ...s, [g.goal_id]: e.target.value }))}
+                    />
+                    <button
+                      type="button"
+                      className="btn-primary"
+                      disabled={savingId === g.goal_id}
+                      onClick={() => bumpSavings(g.goal_id, g.progress_pct)}
+                    >
+                      + Add savings
+                    </button>
                   </div>
+                  <button type="button" className="btn-outline" onClick={() => setPostponeGoal(g)}>
+                    Postpone
+                  </button>
+                  <button type="button" className="btn-outline" onClick={() => toggleExpand(g.goal_id)}>
+                    {isOpen ? "Hide ▲" : "Details ▼"}
+                  </button>
                 </div>
-              </div>
-
-              <div className="purchase-actions">
-                <label className="muted small">
-                  Log savings
-                  <input
-                    type="number"
-                    min="0"
-                    placeholder="₹"
-                    value={saveInput[g.goal_id] || ""}
-                    onChange={(e) => setSaveInput((s) => ({ ...s, [g.goal_id]: e.target.value }))}
-                  />
-                </label>
-                <button
-                  type="button"
-                  className="btn-primary"
-                  disabled={savingId === g.goal_id}
-                  onClick={() => bumpSavings(g.goal_id, g.progress_pct)}
-                >
-                  Update progress
-                </button>
-                <button type="button" className="btn-outline" onClick={() => removeGoal(g.goal_id)}>
-                  🗑️ Cancel goal
-                </button>
-              </div>
-            </article>
-          ))}
+                {isOpen && (
+                  <div className="planner-card-body-v2">
+                    <div className="planner-emi-compare">
+                      <div className="planner-emi-col recommended">
+                        <strong>💵 Cash</strong>
+                        <p>{fmt(g.emi_vs_cash?.cash?.total)}</p>
+                        <p className="muted small">{g.emi_vs_cash?.cash?.verdict}</p>
+                      </div>
+                      <div className="planner-emi-col">
+                        <strong>12m EMI</strong>
+                        <p>{fmt(g.emi_vs_cash?.emi_12?.monthly)}/mo</p>
+                        <p className="muted small">Total {fmt(g.emi_vs_cash?.emi_12?.total)}</p>
+                      </div>
+                      <div className="planner-emi-col">
+                        <strong>24m EMI</strong>
+                        <p>{fmt(g.emi_vs_cash?.emi_24?.monthly)}/mo</p>
+                        <p className="muted small">Total {fmt(g.emi_vs_cash?.emi_24?.total)}</p>
+                      </div>
+                    </div>
+                    {(g.sacrifice_plan || []).length > 0 && (
+                      <div className="planner-chip-row">
+                        {(g.sacrifice_plan || []).map((s, i) => (
+                          <span key={i} className="planner-chip">
+                            {s.category} −{fmt(s.suggested_cut)}/mo
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    {g.ai_advice && (
+                      <p className="muted small" style={{ marginTop: 8 }}>
+                        💡 {g.ai_advice}
+                      </p>
+                    )}
+                    <div style={{ marginTop: 16 }}>
+                      <h4 className="muted small" style={{ textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                        Milestones
+                      </h4>
+                      <div style={{ display: "flex", gap: 4, overflowX: "auto", paddingTop: 8 }}>
+                        {(g.milestones || []).map((m, i) => (
+                          <div key={i} style={{ textAlign: "center", minWidth: 72, fontSize: 11 }}>
+                            <div
+                              style={{
+                                width: 28,
+                                height: 28,
+                                borderRadius: "50%",
+                                background: i === (g.milestones?.length || 0) - 1 ? "#f97316" : ACCENT,
+                                margin: "0 auto 4px",
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "center",
+                              }}
+                            >
+                              {i === (g.milestones?.length || 0) - 1 ? "🎯" : "●"}
+                            </div>
+                            <div>{m.label}</div>
+                            <div style={{ fontWeight: 700 }}>₹{(m.amount / 1000).toFixed(0)}k</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                    <button type="button" className="btn-outline" style={{ marginTop: 12 }} onClick={() => removeGoal(g.goal_id)}>
+                      Cancel goal
+                    </button>
+                  </div>
+                )}
+              </article>
+            );
+          })}
       </div>
-
       {modal && (
         <div className="modal-overlay" role="dialog" aria-modal="true">
           <div className="modal-card glass-card purchase-modal">
@@ -505,8 +506,44 @@ const PurchasePlanner = ({ userId }) => {
           </div>
         </div>
       )}
+
+      {postponeGoal && (
+        <div
+          className="modal-overlay"
+          role="dialog"
+          aria-modal="true"
+          onClick={(e) => e.target === e.currentTarget && setPostponeGoal(null)}
+        >
+          <div className="modal-card glass-card purchase-modal" onClick={(e) => e.stopPropagation()}>
+            <h3>Postpone — {postponeGoal.item_name}</h3>
+            <p className="muted small">
+              Shifts your target date and lowers monthly savings pace. EMI Tracker and planners will update.
+            </p>
+            <label className="fraud-field">
+              Postpone by (months)
+              <input
+                type="number"
+                min={1}
+                max={60}
+                value={postponeMonths}
+                onChange={(e) => setPostponeMonths(e.target.value)}
+              />
+            </label>
+            <div className="fest-card-actions" style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
+              <button type="button" className="btn-outline" onClick={() => setPostponeGoal(null)}>
+                Cancel
+              </button>
+              <button type="button" className="btn-primary" disabled={postponing} onClick={handlePostpone}>
+                {postponing ? "Updating…" : "Confirm postpone"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 };
 
 export default PurchasePlanner;
+

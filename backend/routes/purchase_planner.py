@@ -181,9 +181,8 @@ def generate_purchase_advice(
     best_buy_label: str,
 ) -> str:
     system = """You are SmartSpend financial advisor.
-Give personalized advice about a purchase goal in clear, professional English.
-Be specific with rupee amounts. Tone: supportive financial advisor.
-Plain text only, max 4 sentences — no JSON, no bullet labels."""
+Give personalized purchase advice in clear English. Max 3 short sentences, 80 words total.
+Be specific with rupee amounts. No JSON, no bullet labels, no generic platitudes."""
 
     prompt = (
         f"User: {user_name}\nWants: {item_name}\nCost: ₹{target_amount:,.0f}\n"
@@ -193,7 +192,7 @@ Plain text only, max 4 sentences — no JSON, no bullet labels."""
         "Answer: (1) Is this realistic? one honest line. (2) One specific tip to save faster. "
         "(3) EMI vs cash — one line. (4) Short encouragement."
     )
-    out = call_groq(system, prompt, max_tokens=380, temperature=0.55)
+    out = call_groq(system, prompt, max_tokens=180, temperature=0.5)
     text = out.strip() if isinstance(out, str) else ""
     if text:
         return text
@@ -281,6 +280,24 @@ def _enrich_goal(conn, user_id: int, row: tuple) -> dict[str, Any]:
 
     progress_pct = round(100.0 * saved_f / target_amount_f, 1) if target_amount_f > 0 else 0.0
 
+    festival_link: Optional[dict[str, Any]] = None
+    try:
+        cur2 = conn.cursor()
+        cur2.execute(
+            "SELECT linked_festival_key, display_timeline_label FROM purchase_goals WHERE id = %s;",
+            (gid,),
+        )
+        lk = cur2.fetchone()
+        cur2.close()
+        if lk:
+            fk = (lk[0] or "").strip()
+            dl = (lk[1] or "").strip()
+            if fk or dl:
+                label = dl or fk.replace("_", " ").title()
+                festival_link = {"key": fk or None, "label": label}
+    except Exception:
+        pass
+
     return {
         "goal_id": gid,
         "item_name": item_name,
@@ -301,6 +318,7 @@ def _enrich_goal(conn, user_id: int, row: tuple) -> dict[str, Any]:
         "priority": priority,
         "status": status,
         "saved_amount": saved_f,
+        "festival_link": festival_link,
     }
 
 
@@ -328,8 +346,11 @@ def list_goals(user_id: int, conn=Depends(get_db)):
     goals = [_enrich_goal(conn, user_id, r) for r in rows]
     total_monthly = sum(g["monthly_target"] for g in goals)
     avg_saved = _avg_monthly_saved(conn, user_id)
+    on_track_count = sum(1 for g in goals if g.get("on_track"))
     return {
         "goals": goals,
+        "goals_on_track": on_track_count,
+        "goals_total": len(goals),
         "total_monthly_saving_needed": round(total_monthly, 2),
         "current_savings_rate_monthly": round(avg_saved, 2),
         "gap_monthly": round(max(0.0, total_monthly - avg_saved), 2),
@@ -714,6 +735,12 @@ def postpone_purchase_goal(user_id: int, goal_id: int, body: PostponeGoalBody, c
             cur.close()
             cur = conn.cursor()
 
+    try:
+        from services.financial_engine import recalculate_financial_state as _rfs
+
+        _rfs(conn, user_id, "purchase_goal_postponed", goal_id, "Goal postponed to festival milestone.")
+    except Exception:
+        pass
     cur.close()
     enriched = _enrich_goal(conn, user_id, row2)
     return {

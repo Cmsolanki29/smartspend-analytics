@@ -654,6 +654,9 @@ export const getFestivalHistory = async (userId) =>
 export const postFestivalSetBudget = async (userId, payload) =>
   request(api.post(`/festivals/${userId}/set-budget`, payload));
 
+export const putFestivalUpdateSavings = async (userId, payload) =>
+  request(api.put(`/festivals/${userId}/update-savings`, payload));
+
 export const getFestivalImportantDays = async (userId) =>
   request(api.get(`/festivals/${userId}/important-days`));
 
@@ -676,6 +679,10 @@ export const putPurchaseUpdateSavings = async (userId, goalId, amountSaved) =>
 
 export const deletePurchaseGoal = async (userId, goalId) =>
   request(api.delete(`/purchases/${userId}/${goalId}`));
+
+/** Postpone purchase goal by months (Purchase Planner or EMI). */
+export const postPurchasePostponeMonths = async (userId, goalId, postponeMonths) =>
+  postPurchasePostponeGoal(userId, goalId, postponeMonths);
 
 // ── Financial Engine (Interconnected System) ─────────────────────────────────
 

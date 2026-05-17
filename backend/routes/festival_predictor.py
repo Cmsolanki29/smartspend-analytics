@@ -180,9 +180,10 @@ def generate_festival_ai_blocks(
 ) -> tuple[str, str, str]:
     system = (
         "You are SmartSpend festival budget advisor. Output plain text ONLY using exactly these "
-        "line markers (including angle brackets): <<<ADVICE>>> then paragraph, <<<TIP>>> then one sentence, "
-        "<<<WARNING>>> then one short sentence. Write in clear, professional yet friendly English. "
-        "Be specific with rupee amounts. Use Indian financial context (UPI, festivals). No Hindi. No JSON."
+        "line markers (including angle brackets): <<<ADVICE>>> then 1-2 SHORT sentences (max 35 words), "
+        "<<<TIP>>> then one short sentence (max 20 words), "
+        "<<<WARNING>>> then one short sentence (max 20 words). "
+        "Be specific with rupee amounts. No Hindi. No JSON. No generic platitudes."
     )
     facts = (
         f"User name: {user_name}\nFestival: {festival}\nDays left: {days_remaining}\n"
@@ -191,11 +192,8 @@ def generate_festival_ai_blocks(
         f"Monthly saving needed: ₹{monthly_saving_needed:.0f}\nMonthly income: ₹{user_income:.0f}\n"
         f"Approx food delivery spend (90d avg monthly): ₹{food_delivery_monthly:.0f}\n"
         f"Approx subscription-like spend (90d avg monthly): ₹{sub_monthly:.0f}\n"
-        f"ADVICE: 3-4 sentences — plan, emotional but practical.\n"
-        f"TIP: one sentence suggesting concrete cuts using ONLY the numbers above.\n"
-        f"WARNING: one sentence — what happens if they do not start saving now (credit stress), use festival name."
     )
-    raw = call_groq(system, facts, max_tokens=420, temperature=0.55)
+    raw = call_groq(system, facts, max_tokens=220, temperature=0.5)
     raw_s = raw if isinstance(raw, str) else ""
     a, t, w = _parse_groq_triple(raw_s)
     if not a and raw_s:
@@ -343,6 +341,13 @@ def set_festival_budget(user_id: int, body: SetBudgetBody, conn=Depends(get_db))
         )
     cur.close()
 
+    try:
+        from services.financial_engine import recalculate_financial_state as _rfs
+
+        _rfs(conn, user_id, "festival_budget_set", None, f"Festival budget set for {body.festival_name}.")
+    except Exception:
+        pass
+
     return {
         "success": True,
         "festival_name": body.festival_name,
@@ -351,6 +356,142 @@ def set_festival_budget(user_id: int, body: SetBudgetBody, conn=Depends(get_db))
         "monthly_saving_needed": round(monthly_needed, 2),
         "weekly_saving_needed": round(monthly_needed / 4.33, 2),
         "daily_saving_needed": round(monthly_needed / 30.0, 2),
+    }
+
+
+class FestivalUpdateSavingsBody(BaseModel):
+    festival_name: str = Field(..., min_length=1)
+    amount_saved: float = Field(..., ge=0)
+
+
+def _linked_purchase_goals(conn, user_id: int, fest_name: str, fest_date: date) -> list[dict[str, Any]]:
+    """Purchase goals linked to this festival (explicit key/label or fuzzy name/date)."""
+    cur = conn.cursor()
+    rows: list[tuple[Any, ...]] = []
+    try:
+        cur.execute(
+            """
+            SELECT id, item_name, target_amount, target_date, linked_festival_key, display_timeline_label
+            FROM purchase_goals
+            WHERE user_id = %s
+              AND UPPER(COALESCE(status, '')) NOT IN ('CANCELLED', 'COMPLETED');
+            """,
+            (user_id,),
+        )
+        rows = cur.fetchall()
+    except Exception:
+        conn.rollback()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id, item_name, target_amount, target_date
+            FROM purchase_goals
+            WHERE user_id = %s
+              AND UPPER(COALESCE(status, '')) NOT IN ('CANCELLED', 'COMPLETED');
+            """,
+            (user_id,),
+        )
+        rows = [(r[0], r[1], r[2], r[3], None, None) for r in cur.fetchall()]
+    cur.close()
+
+    fest_prefix = _norm_name(fest_name).replace(" ", "_").replace("-", "_")
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        gid, name, amt, td = int(r[0]), str(r[1]), float(r[2] or 0), r[3]
+        fk = (str(r[4]) if len(r) > 4 and r[4] else "") or ""
+        dl = (str(r[5]) if len(r) > 5 and r[5] else "") or ""
+        td_d = td if isinstance(td, date) else datetime.strptime(str(td)[:10], "%Y-%m-%d").date()
+        linked = False
+        if fk and fest_prefix in _norm_name(fk).replace(" ", "_"):
+            linked = True
+        if dl and _match_db_name(fest_name, dl):
+            linked = True
+        if _match_db_name(fest_name, name):
+            linked = True
+        if abs((td_d - fest_date).days) <= 21:
+            linked = True
+        if linked:
+            out.append(
+                {
+                    "goal_id": gid,
+                    "item_name": name,
+                    "target_amount": round(amt, 2),
+                    "target_date": td_d.isoformat(),
+                }
+            )
+    return out
+
+
+@router.put("/{user_id}/update-savings")
+def update_festival_savings(user_id: int, body: FestivalUpdateSavingsBody, conn=Depends(get_db)):
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM users WHERE id = %s;", (user_id,))
+    if not cur.fetchone():
+        cur.close()
+        raise HTTPException(404, "User not found")
+
+    fest_date: Optional[date] = None
+    for f in INDIAN_FESTIVALS_2026:
+        if _match_db_name(body.festival_name, f["name"]):
+            fest_date = datetime.strptime(f["date"], "%Y-%m-%d").date()
+            break
+    if fest_date is None:
+        cur.close()
+        raise HTTPException(400, "Unknown festival name for 2026 calendar")
+
+    row = _fetch_budget_row(conn, user_id, body.festival_name, fest_date)
+    today = date.today()
+    days_rem = max((fest_date - today).days, 0)
+    months_rem = max(days_rem / 30.0, 0.25)
+
+    if row:
+        new_saved = float(row[3] or 0) + float(body.amount_saved)
+        planned = float(row[2] or 0)
+        last_year = float(row[1] or 0)
+        income = _user_income(conn, user_id)
+        recommended = planned if planned > 0 else round(last_year * 1.0526) if last_year > 0 else round(income * 0.08)
+        gap = max(0.0, recommended - new_saved)
+        monthly_needed = gap / months_rem if months_rem else 0.0
+        cur.execute(
+            """
+            UPDATE festival_budgets
+            SET saved_so_far = %s, monthly_target = %s, days_remaining = %s
+            WHERE id = %s;
+            """,
+            (new_saved, monthly_needed, days_rem, row[0]),
+        )
+    else:
+        income = _user_income(conn, user_id)
+        recommended = round(income * 0.08)
+        new_saved = float(body.amount_saved)
+        gap = max(0.0, recommended - new_saved)
+        monthly_needed = gap / months_rem if months_rem else 0.0
+        cur.execute(
+            """
+            INSERT INTO festival_budgets (
+              user_id, festival_name, festival_date, last_year_spent, planned_budget,
+              saved_so_far, monthly_target, days_remaining, status, category_breakdown
+            ) VALUES (%s, %s, %s, 0, 0, %s, %s, %s, 'UPCOMING', '{}'::jsonb);
+            """,
+            (user_id, body.festival_name.strip(), fest_date, new_saved, monthly_needed, days_rem),
+        )
+    cur.close()
+
+    try:
+        from services.financial_engine import recalculate_financial_state as _rfs
+
+        _rfs(conn, user_id, "festival_savings_updated", None, f"Savings logged for {body.festival_name}.")
+    except Exception:
+        pass
+
+    progress_pct = round(100.0 * new_saved / recommended, 1) if recommended > 0 else 0.0
+    return {
+        "success": True,
+        "festival_name": body.festival_name,
+        "saved_so_far": round(new_saved, 2),
+        "recommended_budget": round(recommended, 2),
+        "monthly_saving_needed": round(monthly_needed, 2),
+        "progress_pct": progress_pct,
     }
 
 
@@ -417,6 +558,8 @@ def upcoming_festivals(user_id: int, conn=Depends(get_db)):
         )
 
         urgency = _urgency(days_rem)
+        progress_pct = round(100.0 * saved / recommended, 1) if recommended > 0 else 0.0
+        linked_goals = _linked_purchase_goals(conn, user_id, fest["name"], d)
         upcoming.append(
             {
                 "festival_name": fest["name"],
@@ -426,11 +569,13 @@ def upcoming_festivals(user_id: int, conn=Depends(get_db)):
                 "last_year_spent": round(last_year, 2),
                 "recommended_budget": round(recommended, 2),
                 "saved_so_far": round(saved, 2),
+                "progress_pct": progress_pct,
                 "monthly_saving_needed": round(monthly_need, 2),
                 "weekly_saving_needed": round(weekly_need, 2),
                 "daily_saving_needed": round(daily_need, 2),
                 "urgency": urgency,
                 "category_breakdown": cat,
+                "linked_goals": linked_goals,
                 "ai_advice": ai_advice,
                 "saving_tip": saving_tip,
                 "if_no_saving_warning": if_no,
@@ -457,6 +602,7 @@ def upcoming_festivals(user_id: int, conn=Depends(get_db)):
     if food_m > 0:
         gap_items.append(f"Trim food delivery (~{round(min(food_m * 0.35, gap_month * 0.5)):,} ₹/mo suggested cut).")
 
+    on_track = gap_month <= max(500, monthly_sum * 0.15) if monthly_sum > 0 else True
     return {
         "upcoming_festivals": upcoming,
         "total_festival_budget_needed": round(total_budget, 2),
@@ -464,6 +610,7 @@ def upcoming_festivals(user_id: int, conn=Depends(get_db)):
         "monthly_total_target": round(monthly_sum, 2),
         "current_savings_rate_monthly": round(avg_saved, 2),
         "gap_vs_current_savings_monthly": round(gap_month, 2),
+        "on_track": on_track,
         "gap_close_suggestions": gap_items,
         "biggest_festival": biggest,
         "next_festival": next_f,
