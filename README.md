@@ -1,71 +1,267 @@
 # SmartSpend Analytics
 
-> **Your money, intelligently shielded.** — An AI-native personal finance OS that turns bank and credit-card statements into a unified command center for visibility, fraud protection, savings, and planning.
+### AI-driven financial insights and risk monitoring
 
-**Hackathon:** EXIQO Code-AI-Thon · **Repo:** [smartspend-analytics](https://github.com/Cmsolanki29/smartspend-analytics) · **Judge setup:** [SETUP.md](SETUP.md)
+[![EXIQO Code-AI-Thon](https://img.shields.io/badge/Event-EXIQO%20Code--AI--Thon-7c3aed?style=for-the-badge)](https://github.com/Cmsolanki29/smartspend-analytics)
+[![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://python.org)
+[![React](https://img.shields.io/badge/React-18-61DAFB?style=flat-square&logo=react&logoColor=black)](https://reactjs.org)
+[![FastAPI](https://img.shields.io/badge/FastAPI-API-009688?style=flat-square&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-Neon%20%7C%20local-4169E1?style=flat-square&logo=postgresql&logoColor=white)](https://neon.tech)
 
-| | URL |
-|---|-----|
-| **Live app** | _Set after Vercel deploy — e.g. `https://smartspend-analytics.vercel.app`_ |
-| **API / Swagger** | _Set after Render deploy — e.g. `https://smartspend-backend.onrender.com/docs`_ |
-| **Health check** | `GET /health` on your backend URL |
+> **Your money, intelligently shielded.** — *From raw transactions to decisions before money is lost.*
+
+**Built for hackathon demo** · Replace event/team name in badges as needed.
+
+| Jump to | |
+|---------|--|
+| [Problem](#-problem-statement) | [Features](#-features) | [Architecture](#-architecture) |
+| [Quick start (judges)](#-quick-start-for-judges) | [Run locally](#-run-locally) | [Demo script](#-demo-script-hackathon) |
+| [Full setup guide](SETUP.md) | [API](#-api-highlights) | [Deploy](#-production-deployment) |
 
 ---
 
-## Summary
+## Live links
 
-SmartSpend is an end-to-end **personal finance platform** for consumers who manage money across bank accounts, credit cards, UPI, subscriptions, and EMIs. Users connect data by uploading statements (CSV, Excel, or text PDF) or using pre-seeded demo accounts. The app then delivers:
+| | URL |
+|---|-----|
+| **Web app** | _Set after Vercel deploy — e.g. `https://smartspend-analytics.vercel.app`_ |
+| **API health** | _Set after Render deploy — e.g. `https://smartspend-backend.onrender.com/health`_ |
+| **Swagger** | _e.g. `https://smartspend-backend.onrender.com/docs`_ |
 
-| Pillar | What it does |
-|--------|----------------|
-| **See** | Dashboard KPIs, health score (0–100), spending charts, searchable transactions |
-| **Protect** | **FraudShield** — 12-phase risk stack (rules, Isolation Forest, XGBoost, graph/GNN, LLM investigation, pre-payment checker) |
-| **Save** | Subscription Intelligence (KEEP/REVIEW/CANCEL verdicts), dark-pattern detector (₹1 traps, zombies, duplicates) |
-| **Plan** | EMI tracker, festival budgets, purchase goals, AI trip planner |
-| **Ask** | Context-grounded AI chat and insights — answers use **your** ledger, not generic finance tips |
+> Render free tier may sleep after ~15 min idle — first request can take **30–60 seconds**.
 
-Unlike a simple expense tracker, every module feeds a central **Financial State Engine** that recalculates monthly surplus and pushes alerts when the user is overcommitted.
+---
 
-**Tech stack:** React 18 · FastAPI · PostgreSQL (Neon) · scikit-learn / XGBoost · Groq / OpenAI / Gemini · Deploy on **Vercel** (UI) + **Render** (API) + **Neon** (DB).
+## Problem statement
+
+Digital transactions create large volumes of data, but most users get **no actionable intelligence** from it.
+
+**We address three gaps:**
+
+| # | Gap | SmartSpend response |
+|---|-----|---------------------|
+| 1 | **Data without insight** | Raw exports and PDFs → health score, trends, AI narratives grounded in *your* ledger |
+| 2 | **Reactive fraud** | Losses found after money leaves → **FraudShield** pre-payment check + ML alerts + investigation |
+| 3 | **Low financial self-awareness** | No simple view of savings, EMI load, leakages → dashboard, EMI trap detector, subscription verdicts |
+
+---
+
+## What we built
+
+**SmartSpend Analytics** turns PostgreSQL transaction history into dashboards, ML anomaly flags, rule-based fraud checks, and optional AI (OpenAI / Groq / Gemini) explanations — tuned for **Indian context** (UPI, EMI, festivals, ₹).
+
+Five pillars: **See** · **Protect** · **Save** · **Plan** · **Ask** — all feeding one **Financial State Engine** that recalculates monthly surplus and warns when overcommitted.
+
+---
+
+## Features
+
+### Core
+
+| Feature | Description |
+|--------|-------------|
+| **Dashboard** | Period-aware overview, charts, merchants, transactions (bank / card / merged) |
+| **ML anomaly detection** | Isolation Forest flags suspicious transactions per user |
+| **Health score** | 0–100 score with grade (A–F) and breakdown |
+| **AI insights** | LLM monthly narrative and tips (Groq → OpenAI → Gemini waterfall) |
+| **Scenario simulator** | “What if” projections on savings and health |
+| **Statement upload** | CSV, Excel, text PDF — Axis, HDFC, ICICI parsers |
+
+### Advanced
+
+| Feature | Description |
+|--------|-------------|
+| **EMI trap detector** | Debt-to-income vs safe band; affordability before new EMI |
+| **Subscription intelligence** | KEEP / REVIEW / CANCEL / UPGRADE verdicts + graveyard |
+| **Dark pattern detector** | ₹1 traps, zombies, duplicates, price escalation |
+| **FraudShield** | 12-phase stack — pre-send check, alerts, SHAP, LLM investigation |
+| **Festival planner** | Indian festival calendar + savings targets vs surplus |
+| **Purchase planner** | Goal milestones, EMI vs cash, sacrifice hints |
+| **Trip planner** | Agent + MCP travel tools |
+| **AI chat** | SSE streaming; context from DB, not generic finance tips |
+
+<details>
+<summary><strong>▶ FraudShield phases (expand)</strong></summary>
+
+| Phase | Capability |
+|-------|------------|
+| 1–4 | Event engine, feature store, supervised scoring, decision engine |
+| 5–8 | MLOps registry, graph intelligence, SHAP, feedback flywheel |
+| 9–12 | LLM investigation agent, GNN (optional), DNN shadow, orchestrator |
+
+Controlled via `.env`: `PHASE_9_AGENT_ENABLED`, `PHASE_12_ORCHESTRATOR_ENABLED`, etc.
+
+</details>
+
+---
+
+## Architecture
+
+```mermaid
+flowchart TB
+  subgraph Client["Browser"]
+    UI["React 18 SPA\nlocalhost:3000 / Vercel"]
+  end
+
+  subgraph API["Backend"]
+    FAST["FastAPI :8002\nREST + SSE + WebSocket"]
+  end
+
+  subgraph Data["Data layer"]
+    PG[("PostgreSQL\nNeon / local")]
+    RD["Redis\noptional workers"]
+  end
+
+  subgraph Intelligence["Intelligence"]
+    IF["Isolation Forest"]
+    RULES["Rules + XGBoost"]
+    LLM["Groq → OpenAI → Gemini"]
+  end
+
+  UI -->|"/api proxy"| FAST
+  FAST --> PG
+  FAST --> RD
+  FAST --> IF
+  FAST --> RULES
+  FAST --> LLM
+```
+
+| Layer | Path | Stack |
+|-------|------|--------|
+| **Frontend** | `frontend/` | React 18, Tailwind, Recharts, Framer Motion, Axios → `setupProxy.js` → **:8002** |
+| **Backend** | `backend/` | FastAPI, scikit-learn, pandas, psycopg2, OpenAI-compatible clients |
+| **Database** | `backend/database/migrations/` | Versioned SQL + `scripts/apply_migrations.py` |
+| **Samples** | `test samples/` | Demo bank/card PDFs for upload |
+
+<details>
+<summary><strong>▶ Data → AI pipeline (expand)</strong></summary>
+
+```
+PostgreSQL (transactions, EMI, goals, festivals)
+        │
+        ▼
+ai_context_service  — compress ledger (no raw rows to LLM)
+        │
+        ├──► Deterministic (health score, surplus, subscription verdicts)
+        └──► LLM (insights, chat, investigation) — structured JSON only
+```
+
+Balances are **never hallucinated** — engines use real DB aggregates.
+
+</details>
+
+<details>
+<summary><strong>▶ Backend modules (expand)</strong></summary>
+
+| Module | Path | Role |
+|--------|------|------|
+| Auth & onboarding | `routes/auth.py`, `otp.py` | JWT, OTP, source selection |
+| Documents | `routes/documents.py` | PDF/CSV/Excel ingestion |
+| Dashboard | `routes/dashboard.py` | Scoped KPIs, trends |
+| FraudShield | `routes/fraud_shield.py` | Full risk pipeline |
+| AI chat & insights | `routes/ai_chat.py`, `insights.py` | SSE chat, insights waterfall |
+| EMI / Festival / Purchase | `routes/emi_*.py`, `festival_*.py`, `purchase_planner.py` | Planning modules |
+| Subscriptions | `routes/subscription_intelligence.py` | Verdict engine |
+| Workers | `workers/*` | Alerts, drift, retrain (Redis) |
+
+</details>
+
+<details>
+<summary><strong>▶ Frontend map (expand)</strong></summary>
+
+| UI | Location |
+|----|----------|
+| Dashboard | `components/Dashboard/` |
+| FraudShield | `components/FraudShield/` |
+| EMI | `components/EMI/` |
+| Subscriptions | `pages/SubscriptionHub` |
+| AI chat | `pages/AIAnalysisEngine` |
+| Festival / Purchase | `components/Festival/`, `components/Purchase/` |
+
+</details>
 
 ---
 
 ## Quick start for judges
 
-> **Full step-by-step guide:** [SETUP.md](SETUP.md) (live demo, local install, troubleshooting)
+**Fastest path:** [SETUP.md](SETUP.md) — live demo URLs, local install, troubleshooting.
 
-### Option A — Live demo (fastest)
+### One-click demo login
 
-1. Open the deployed web app URL (see table above).
-2. Sign in with a demo account — **password for all:** `Pass@123`
+**Password for all:** `Pass@123`
 
-| Email | Persona |
-|-------|---------|
-| `judgedemo1@judge.smartspend.example.com` | Priya Kulkarni — general dashboard |
-| `judgedemo2@judge.smartspend.example.com` | Rahul Mehta — **EMI / affordability demo** |
+| Email | Best for |
+|-------|----------|
+| `judgedemo1@judge.smartspend.example.com` | General dashboard |
+| `judgedemo2@judge.smartspend.example.com` | **EMI / affordability demo** |
+| `judgedemo4@judge.smartspend.example.com` | Rich transaction data |
 | `judgedemo3@judge.smartspend.example.com` | Ananya Desai |
-| `judgedemo4@judge.smartspend.example.com` | Vikram Singh — rich transaction data |
 | `judgedemo5@judge.smartspend.example.com` | Neha Joshi |
 | `judgedemo6@judge.smartspend.example.com` | Karan Ahuja |
 
-3. Suggested walkthrough: **Dashboard** → **FraudShield** → **EMI Tracker** (judgedemo2) → **AI chat** (“Where did I spend the most last month?”).
+### 5-minute walkthrough
 
-> **Note:** Render free tier sleeps after ~15 min idle; first API call may take **30–60 seconds**.
+1. Sign in → **judgedemo2** or **judgedemo4**
+2. **Dashboard** — health score, KPIs, charts
+3. **FraudShield** → **Check transaction** (KYC, lottery, collect quick tests)
+4. **EMI Tracker** (judgedemo2)
+5. **AI chat** — *“Where did I spend the most last month?”*
 
-### Option B — Run locally
+---
 
-**Prerequisites:** Node.js 18+, Python 3.11+, PostgreSQL 14+ (or [Neon](https://neon.tech) cloud DB), optional [Groq API key](https://console.groq.com) for AI features.
+## Run locally
+
+### Prerequisites
+
+| Tool | Version |
+|------|---------|
+| Node.js | LTS 18+ |
+| Python | 3.11+ (3.13 OK) |
+| PostgreSQL | 14+ or [Neon](https://neon.tech) free tier |
+
+### Environment
+
+Copy `.env.example` → `.env` at **project root**:
+
+| Variable | Required | Purpose |
+|----------|----------|---------|
+| `DB_*` or `DATABASE_URL` | Yes | PostgreSQL |
+| `JWT_SECRET_KEY` | Yes | Auth tokens |
+| `GROQ_API_KEY` | No* | AI chat, insights, planners |
+| `OPENAI_API_KEY` / `GEMINI_API_KEY` | No | Insights waterfall fallbacks |
+
+\*App runs without LLM keys — dashboard, fraud rules, and ML work; AI text uses graceful fallbacks.
+
+<details>
+<summary><strong>▶ Database setup (expand)</strong></summary>
+
+**Local Postgres** — create DB once:
+
+```sql
+CREATE DATABASE smartspend_db;
+```
+
+**Apply schema + demo users** (from `backend/` with venv active):
 
 ```bash
-# 1. Clone
+python -m scripts.apply_migrations
+python -m scripts.seed_judge_demo_users
+```
+
+Do **not** use legacy `database/schema.sql` only — migrations in `backend/database/migrations/` are the source of truth.
+
+</details>
+
+### Commands
+
+**Terminal 1 — API**
+
+```bash
 git clone https://github.com/Cmsolanki29/smartspend-analytics.git
 cd smartspend-analytics
-
-# 2. Environment (repo root)
 cp .env.example .env
-# Edit .env — set DATABASE_URL or DB_* and GROQ_API_KEY
+# edit .env
 
-# 3. Backend
 cd backend
 python -m venv .venv
 # Windows:  .\.venv\Scripts\Activate.ps1
@@ -75,8 +271,11 @@ pip install -r requirements-base.txt -r requirements-ml-risk.txt   # or requirem
 python -m scripts.apply_migrations
 python -m scripts.seed_judge_demo_users
 uvicorn main:app --reload --host 127.0.0.1 --port 8002
+```
 
-# 4. Frontend (new terminal)
+**Terminal 2 — Web**
+
+```bash
 cd frontend
 npm install
 npm start
@@ -84,185 +283,48 @@ npm start
 
 | Service | URL |
 |---------|-----|
-| Web app | http://localhost:3000 |
+| App | http://localhost:3000 |
 | API | http://127.0.0.1:8002 |
-| Swagger docs | http://127.0.0.1:8002/docs |
+| Swagger | http://127.0.0.1:8002/docs |
 | Health | http://127.0.0.1:8002/health |
 
-**Windows one-command start** (from repo root):
+**Windows — one command** (repo root):
 
 ```powershell
 .\start-dev.ps1
 ```
 
-Kills stale processes, starts backend on **8002** and frontend on **3000**. Wait ~30s for React to compile.
+Dev proxy: `frontend/setupProxy.js` forwards `/api` → **8002** (no `REACT_APP_API_URL` needed locally).
 
-**Sample statements** for upload demos live in `test samples/` (Axis, HDFC PDFs).
-
----
-
-## Production deployment
-
-### 1. Database — [Neon](https://neon.tech)
+<details>
+<summary><strong>▶ Production build (expand)</strong></summary>
 
 ```bash
-cd backend
-pip install -r requirements-render.txt
-# Windows CMD:  set DATABASE_URL=postgresql://...
-# macOS/Linux:  export DATABASE_URL=postgresql://...
-python -m scripts.deploy_production_db
+cd frontend
+npm run build
 ```
 
-Applies migrations and seeds the six judge demo users.
+Deploy `frontend/build` to Vercel; set `REACT_APP_API_URL=https://YOUR-BACKEND.onrender.com/api`.
 
-### 2. Backend — [Render](https://render.com)
+See [Production deployment](#-production-deployment) below.
 
-1. Push repo to GitHub → Render → **New Blueprint** → connect repo (`render.yaml`).
-2. Set secrets: `DATABASE_URL`, `GROQ_API_KEY`, `FRONTEND_URL` (Vercel URL, no trailing slash).
-3. Verify: `curl https://YOUR-BACKEND.onrender.com/health`
-
-### 3. Frontend — [Vercel](https://vercel.com)
-
-1. Import repo → **Root Directory:** `frontend`
-2. Env: `REACT_APP_API_URL=https://YOUR-BACKEND.onrender.com/api`
-3. Set `FRONTEND_URL` on Render to the Vercel URL → redeploy backend (CORS).
+</details>
 
 ---
 
-## Architecture
+## Demo script (hackathon)
 
-### System overview
+| Step | Action | Talking point |
+|------|--------|----------------|
+| 1 | Login **judgedemo2** | Pre-seeded realistic ledger — no upload wait |
+| 2 | Dashboard — change month/year | Period-aware trends and health score |
+| 3 | FraudShield → Check transaction | **Before** money leaves — not reactive |
+| 4 | EMI trap detector | DTI vs safe band; defer goal to fix shortfall |
+| 5 | Purchase planner + Festival strip | Planning tied to real surplus |
+| 6 | AI insights (if key set) | Grounded in PostgreSQL, not generic ChatGPT |
+| 7 | Mention graceful degradation | Works without OpenAI/Groq — rules + ML remain |
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                     React SPA (Vercel / :3000)                   │
-│  Intro · Auth · Dashboard · FraudShield · Planning · AI Chat    │
-└────────────────────────────┬────────────────────────────────────┘
-                             │ REST /api  (+ SSE for chat/insights)
-                             │ WebSocket (realtime fraud feed)
-┌────────────────────────────▼────────────────────────────────────┐
-│                  FastAPI Backend (Render / :8002)                │
-│  routes/          HTTP layer, JWT auth, user-scoped APIs         │
-│  services/        Business logic, ML, LLM, parsers               │
-│  workers/         Redis consumers (alerts, drift, retrain)       │
-└────────────────────────────┬────────────────────────────────────┘
-                             │
-              ┌──────────────┼──────────────┐
-              ▼              ▼              ▼
-        PostgreSQL        Redis         LLM APIs
-        (Neon)         (optional)    Groq → OpenAI → Gemini
-```
-
-**Data → AI pipeline** (balances are never hallucinated):
-
-```
-PostgreSQL (transactions, EMI, goals, festivals)
-        │
-        ▼
-ai_context_service  — compress ledger into context packet
-        │
-        ├──► Deterministic engines (health score, surplus, subscription verdicts)
-        └──► LLM routes (insights, chat, investigation) — structured prompts only
-```
-
----
-
-### Backend modules
-
-| Module | Path | Responsibility |
-|--------|------|----------------|
-| **Auth & onboarding** | `routes/auth.py`, `otp.py`, `onboarding.py` | JWT sign-up/sign-in, OTP, source selection |
-| **Documents & upload** | `routes/documents.py`, `services/upload_pipeline.py` | PDF/CSV/Excel ingestion, bank parsers (Axis, HDFC, …) |
-| **Dashboard & analytics** | `routes/dashboard.py`, `financial_summary.py`, `analysis.py` | Scoped KPIs (bank / card / merged), trends, categories |
-| **Transactions** | `routes/transactions.py`, `user_scoped_api.py` | Ledger, search, risk badges |
-| **Health score** | `routes/health_score.py`, `services/scorer.py` | 0–100 score from savings, stability, anomalies, subscriptions |
-| **Financial state** | `routes/financial_state.py`, `services/` state engine | Monthly surplus, RED/YELLOW alerts after mutations |
-| **Anomalies (ML)** | `routes/anomaly.py`, `services/ml_model.py` | Per-user Isolation Forest on transaction features |
-| **FraudShield** | `routes/fraud_shield.py`, `services/risk_*` | 12-phase pipeline: rules, XGBoost, graph, SHAP, LLM agent, orchestrator |
-| **Investigations** | `routes/investigations.py`, `explainability.py` | Analyst console, factor explanations |
-| **AI chat & insights** | `routes/ai_chat.py`, `insights.py`, `ai_context_service.py` | SSE streaming chat, insights waterfall, jailbreak guard |
-| **Dark patterns** | `routes/dark_patterns.py` | ₹1 traps, zombies, duplicates, price hikes |
-| **Subscriptions** | `routes/subscription_intelligence.py`, `subscription_graveyard.py` | Verdict engine, device-link signals, graveyard |
-| **EMI** | `routes/emi_detector.py`, `emi_affordability_check.py` | Recurring detection, trap detector, affordability |
-| **Festival planner** | `routes/festival_predictor.py`, `festival_planner_ext.py` | Indian festival calendar, budget vs surplus |
-| **Purchase planner** | `routes/purchase_planner.py` | Goal-first buys, sacrifice analysis |
-| **Trip planner** | `routes/trip_planner.py` | Agent + MCP travel tools |
-| **Realtime** | `routes/realtime_ws.py` | Live fraud / transaction feed |
-| **Admin & MLOps** | `routes/admin.py`, `workers/*` | Diagnostics, drift monitor, retrain scheduler |
-| **Database** | `database/migrations/`, `scripts/apply_migrations.py` | Versioned SQL schema (36+ migrations) |
-
-**FraudShield phases (high level):**
-
-| Phase | Capability |
-|-------|------------|
-| 1–4 | Event engine, feature store, supervised scoring, decision engine |
-| 5–8 | MLOps registry, graph intelligence, SHAP explainability, feedback flywheel |
-| 9–12 | LLM investigation agent, GNN (optional), DNN shadow, orchestrator |
-
-Phase flags are controlled via `.env` (`PHASE_9_AGENT_ENABLED`, `PHASE_12_ORCHESTRATOR_ENABLED`, etc.).
-
----
-
-### Frontend sections
-
-| UI area | Location | Maps to |
-|---------|----------|---------|
-| **Intro & auth** | `components/intro/`, `context/AuthContext.tsx` | Cinematic onboarding, sign-up/in |
-| **Source selection** | `pages/Onboarding/SourceSelection` | Bank-only / card-only / merged dashboard mode |
-| **Dashboard** | `components/Dashboard/` | KPIs, health gauge, charts, AI command center |
-| **Transactions** | `components/app-tabs/TransactionsTab` | Searchable ledger with anomaly badges |
-| **Insights** | `components/app-tabs/InsightsTab` | LLM-generated spending narratives |
-| **FraudShield** | `components/FraudShield/` | Alerts, pre-pay checker, behavior profile, Chain Vault |
-| **CyberSafe** | `pages/RiskAwareness/` | Scam education, connect flow |
-| **Dark patterns** | `components/DarkPatterns/` | Trap and duplicate charge analysis |
-| **Subscriptions** | `pages/SubscriptionHub`, `SubscriptionConnect` | Device link, verdict hub, reminders |
-| **EMI** | `components/EMI/` | Tracker, calculator, trap detector |
-| **Festival / Purchase** | `components/Festival/`, `components/Purchase/` | Budget planning with AI advice |
-| **Trip planner** | `pages/AIActions/TripPlannerPage` | Agentic travel planning |
-| **AI chat** | `pages/AIAnalysisEngine` | Streaming chat with statement upload |
-| **Admin** | `pages/admin/AdminDiagnostics` | Internal diagnostics (token-gated) |
-
-**API client:** `frontend/src/services/api.js` — dev proxy via `setupProxy.js` → backend port **8002**.
-
----
-
-## Project structure
-
-```
-exiqo/
-├── backend/
-│   ├── main.py                 # FastAPI app entry
-│   ├── routes/                 # HTTP endpoints by domain
-│   ├── services/               # ML, LLM, parsers, business logic
-│   ├── workers/                # Redis-backed async jobs (risk engine)
-│   ├── database/migrations/    # SQL migrations
-│   └── scripts/                # apply_migrations, seed_judge_demo_users, deploy_production_db
-├── frontend/
-│   ├── src/components/         # UI by feature (Dashboard, FraudShield, EMI, …)
-│   ├── src/pages/              # Full-page views (subscriptions, trip planner, admin)
-│   ├── src/services/           # Axios API clients
-│   └── setupProxy.js           # Dev proxy → :8002
-├── test samples/               # Sample bank/card PDFs for demos
-├── render.yaml                 # Render Blueprint (backend)
-├── .env.example                # Copy to .env at repo root
-├── start-dev.ps1               # Windows: clean restart backend + frontend
-└── SMARTSPEND_PROJECT_OVERVIEW.md   # Extended product & pitch reference
-```
-
----
-
-## Environment variables
-
-Copy `.env.example` → `.env` at the **repo root**.
-
-| Variable | Purpose |
-|----------|---------|
-| `DATABASE_URL` or `DB_*` | PostgreSQL connection |
-| `JWT_SECRET_KEY` | Auth token signing |
-| `GROQ_API_KEY` | Primary LLM (chat, insights, planning) |
-| `OPENAI_API_KEY` / `GEMINI_API_KEY` | Optional fallbacks in insights waterfall |
-| `FRONTEND_URL` | CORS origin for production |
-| `REACT_APP_API_URL` | Frontend build only (Vercel) — must end with `/api` |
+Sample PDFs: `test samples/` (Axis, HDFC).
 
 ---
 
@@ -274,27 +336,86 @@ Copy `.env.example` → `.env` at the **repo root**.
 | `POST /api/auth/signin` | JWT login |
 | `POST /api/documents/upload` | Statement ingestion |
 | `GET /api/dashboard/{user_id}` | Scoped KPIs |
-| `POST /api/fraud-shield/{user_id}/check-transaction` | Live pre-payment fraud check |
-| `POST /api/ai-chat/{user_id}/stream` | Streaming AI chat (SSE) |
+| `GET /api/insights/{user_id}` | AI bundle (month/year) |
+| `POST /api/fraud-shield/{user_id}/check-transaction` | Live fraud check |
+| `GET /api/purchases/{user_id}`, `GET /api/festivals/{user_id}` | Planners |
+| `POST /api/ai-chat/{user_id}/stream` | Streaming chat (SSE) |
 
-Full interactive docs: `/docs` on your backend URL.
+Full list: **Swagger** at `/docs` on your backend URL.
+
+---
+
+## Production deployment
+
+<details>
+<summary><strong>▶ Neon + Render + Vercel (expand)</strong></summary>
+
+**1. Database — [Neon](https://neon.tech)**
+
+```bash
+cd backend
+pip install -r requirements-render.txt
+# set DATABASE_URL=postgresql://...?sslmode=require
+python -m scripts.deploy_production_db
+```
+
+**2. Backend — [Render](https://render.com)** — connect repo, use `render.yaml`, set `DATABASE_URL`, `GROQ_API_KEY`, `FRONTEND_URL`.
+
+**3. Frontend — [Vercel](https://vercel.com)** — root `frontend/`, env `REACT_APP_API_URL=https://YOUR-BACKEND.onrender.com/api`.
+
+Redeploy backend after Vercel URL is known (CORS).
+
+</details>
+
+---
+
+## Project structure
+
+```
+smartspend-analytics/
+├── backend/           # FastAPI, ML, migrations, scripts/
+├── frontend/          # React CRA, setupProxy → :8002
+├── test samples/      # Demo PDFs
+├── SETUP.md           # Judge quick-start (detailed)
+├── render.yaml        # Render Blueprint
+├── .env.example
+└── SMARTSPEND_PROJECT_OVERVIEW.md
+```
 
 ---
 
 ## Troubleshooting
 
+<details>
+<summary><strong>▶ Common issues (expand)</strong></summary>
+
 | Issue | Fix |
 |-------|-----|
-| Backend not reachable on login | Run API on port **8002**; use `.\start-dev.ps1` on Windows |
-| CORS error (deployed) | `FRONTEND_URL` must exactly match Vercel URL (no trailing `/`) |
-| Slow first load (deployed) | Render cold start — wait up to 60s or ping `/health` |
-| DB connection failed | Neon URL needs `?sslmode=require` |
-| AI chat unavailable | Set `GROQ_API_KEY` in `.env` and restart backend |
-| pip install fails (Windows) | Use venv + `requirements-base.txt` + `requirements-ml-risk.txt` |
-| Empty PDF parse | Use CSV/Excel or text-based PDF; scanned PDFs need Tesseract |
+| Backend not reachable | API must be on port **8002**; run `.\start-dev.ps1` |
+| DB connection failed | Check `DATABASE_URL` / `DB_*`; Neon needs `?sslmode=require` |
+| CORS (deployed) | `FRONTEND_URL` = exact Vercel URL, no trailing `/` |
+| Slow first load | Render cold start — wait 60s or ping `/health` |
+| AI empty | Set `GROQ_API_KEY` and restart backend |
+| pip fails (Windows) | `requirements-base.txt` + `requirements-ml-risk.txt` |
+| Port in use | `.\start-dev.ps1` frees 3000 and 8002 |
+
+</details>
 
 ---
 
-## License
+## License / credits
 
-MIT — replace with your team’s license and acknowledgements as needed.
+MIT — replace with your team’s license and acknowledgements (OpenAI, Groq, Google Gemini, mentors, datasets).
+
+---
+
+<p align="center">
+  <strong>SmartSpend Analytics</strong> — ship the story:<br/>
+  <em>from raw transactions to decisions before money is lost.</em>
+</p>
+
+<p align="center">
+  <a href="SETUP.md">Setup guide</a> ·
+  <a href="SMARTSPEND_PROJECT_OVERVIEW.md">Full product overview</a> ·
+  <a href="https://github.com/Cmsolanki29/smartspend-analytics">GitHub</a>
+</p>
