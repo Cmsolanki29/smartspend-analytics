@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { Landmark, CreditCard, Eye, EyeOff, Plus, Trash2 } from "lucide-react";
-import { getConnectedSources, toggleSourceVisibility, updateDashboardMode, deleteConnectedSource } from "../../services/api";
+import { getConnectedSources, toggleSourceVisibility, deleteConnectedSource } from "../../services/api";
 import { useAuth } from "../../context/AuthContext";
 import { useViewMode, normalizeViewMode } from "../../context/ViewModeContext";
 

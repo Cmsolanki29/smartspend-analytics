@@ -18,7 +18,6 @@ import {
   ReactNode,
   useCallback,
   useEffect,
-  useMemo,
   useRef,
   useState,
 } from "react";
@@ -26,7 +25,6 @@ import { useAuth } from "../../context/AuthContext";
 import { pingBackendHealth, waitForBackendReady } from "../../services/api";
 import { AuroraBackground } from "./AuroraBackground";
 import { GlassCard } from "./GlassCard";
-import { GradientButton } from "./GradientButton";
 import { ShieldMark } from "./ShieldMark";
 
 const BRAND_EASE = [0.22, 1, 0.36, 1] as const;
