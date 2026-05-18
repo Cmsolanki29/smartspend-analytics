@@ -2,7 +2,7 @@
 
 > **Your money, intelligently shielded.** — An AI-native personal finance OS that turns bank and credit-card statements into a unified command center for visibility, fraud protection, savings, and planning.
 
-**Hackathon:** EXIQO Code-AI-Thon · **Repo:** [smartspend-analytics](https://github.com/Cmsolanki29/smartspend-analytics)
+**Hackathon:** EXIQO Code-AI-Thon · **Repo:** [smartspend-analytics](https://github.com/Cmsolanki29/smartspend-analytics) · **Judge setup:** [SETUP.md](SETUP.md)
 
 | | URL |
 |---|-----|
@@ -31,6 +31,8 @@ Unlike a simple expense tracker, every module feeds a central **Financial State 
 ---
 
 ## Quick start for judges
+
+> **Full step-by-step guide:** [SETUP.md](SETUP.md) (live demo, local install, troubleshooting)
 
 ### Option A — Live demo (fastest)
 
