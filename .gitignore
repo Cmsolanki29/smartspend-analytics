@@ -1,6 +1,10 @@
 .venv/
 .env
+.env.local
+.env.production
+.env.*.local
 frontend/.env.local
+backend/.env
 __pycache__/
 node_modules/
 dist/

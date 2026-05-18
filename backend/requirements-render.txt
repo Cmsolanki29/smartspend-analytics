@@ -1,0 +1,4 @@
+# Render / Vercel-style hosts: core API + risk engine without PyTorch (saves ~2GB RAM).
+# Phases 10–11 (GNN/DNN) stay disabled unless you deploy with full requirements.txt + GPU.
+-r requirements-base.txt
+-r requirements-ml-risk.txt

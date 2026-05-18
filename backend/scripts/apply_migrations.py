@@ -52,14 +52,10 @@ CREATE TABLE IF NOT EXISTS _migration_history (
 
 
 def _connect() -> PgConnection:
-    """Open a synchronous connection from the standard env vars."""
-    return psycopg2.connect(
-        host=os.getenv("DB_HOST", "localhost"),
-        port=os.getenv("DB_PORT", "5432"),
-        dbname=os.getenv("DB_NAME", "smartspend_db"),
-        user=os.getenv("DB_USER", "postgres"),
-        password=os.getenv("DB_PASSWORD", ""),
-    )
+    """Open a synchronous connection (``DATABASE_URL`` or ``DB_*``)."""
+    from utils.pg_connect import connect
+
+    return connect()
 
 
 def _checksum(path: Path) -> str:

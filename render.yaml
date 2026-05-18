@@ -1,0 +1,44 @@
+# Render Blueprint — https://render.com/docs/blueprint-spec
+# Connect this repo → New Blueprint → set secret env vars in the dashboard.
+services:
+  - type: web
+    name: smartspend-backend
+    runtime: python
+    rootDir: backend
+    plan: free
+    buildCommand: pip install -r requirements-render.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      - key: DATABASE_URL
+        sync: false
+      - key: JWT_SECRET_KEY
+        generateValue: true
+      - key: GROQ_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: FRONTEND_URL
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false
+      - key: ADMIN_TOKEN
+        generateValue: true
+      - key: ENV
+        value: prod
+      - key: PHASE_9_AGENT_ENABLED
+        value: "true"
+      - key: PHASE_10_GNN_ENABLED
+        value: "false"
+      - key: PHASE_11_DNN_ENABLED
+        value: "false"
+      - key: PHASE_11_DNN_PROMOTED
+        value: "false"
+      - key: PHASE_12_ORCHESTRATOR_ENABLED
+        value: "true"
+      - key: SMARTSPEND_SEED_DEMO_TXNS
+        value: "0"

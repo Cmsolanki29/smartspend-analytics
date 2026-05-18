@@ -53,13 +53,9 @@ DEMO_USERS: tuple[tuple[str, str, float], ...] = (
 
 
 def _connect():
-    return psycopg2.connect(
-        host=os.getenv("DB_HOST", "localhost"),
-        port=os.getenv("DB_PORT", "5432"),
-        dbname=os.getenv("DB_NAME", "smartspend_db"),
-        user=os.getenv("DB_USER", "postgres"),
-        password=os.getenv("DB_PASSWORD", ""),
-    )
+    from utils.pg_connect import connect
+
+    return connect()
 
 
 def main() -> int:

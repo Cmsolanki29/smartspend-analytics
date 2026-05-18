@@ -11,7 +11,6 @@ from dotenv import load_dotenv
 # Use override=True so empty/missing keys in the shell do not mask values from the file.
 _env_loaded = False
 for _env_path in (
-    Path(r"C:\Users\Chirag\Downloads\SMARTSPENDAPP\exiqo\.env"),  # absolute — most reliable on Windows
     Path(__file__).resolve().parent.parent / ".env",  # repo root (exiqo/.env)
     Path(__file__).resolve().parent / ".env",  # backend/.env
     Path.cwd() / ".env",
@@ -316,16 +315,18 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-_origins = os.getenv(
-    "CORS_ORIGINS",
+_default_origins = (
     "http://localhost:3000,http://127.0.0.1:3000,"
     "http://localhost:3001,http://127.0.0.1:3001,"
-    "http://localhost:3005,http://127.0.0.1:3005",
-).strip()
-_allow_origins = [o.strip() for o in _origins.split(",") if o.strip()] or [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-]
+    "http://localhost:3005,http://127.0.0.1:3005"
+)
+_origins = os.getenv("CORS_ORIGINS", _default_origins).strip()
+_allow_origins = [o.strip().rstrip("/") for o in _origins.split(",") if o.strip()]
+_frontend_url = os.getenv("FRONTEND_URL", "").strip().rstrip("/")
+if _frontend_url and _frontend_url not in _allow_origins:
+    _allow_origins.append(_frontend_url)
+if not _allow_origins:
+    _allow_origins = ["http://localhost:3000", "http://127.0.0.1:3000"]
 
 app.add_middleware(
     CORSMiddleware,
