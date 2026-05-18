@@ -624,7 +624,7 @@ def run_post_upload_pipeline(user_id: int, conn) -> dict[str, Any]:
 
     cur = conn.cursor()
     try:
-        alerts = score_scoped_transactions(cur, user_id, limit=200, min_risk=35)
+        alerts = score_scoped_transactions(cur, user_id, limit=200, min_risk=50)
         summary["scored"] = len(alerts)
         for a in alerts[:25]:
             tid = a.get("transaction_id")

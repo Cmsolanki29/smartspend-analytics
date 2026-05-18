@@ -76,6 +76,29 @@ function safeWriteFlag() {
   } catch { /* ignore */ }
 }
 
+function hasSeenIntroBefore(): boolean {
+  try {
+    return window.localStorage.getItem(SEEN_INTRO_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+/** Returning visitors skip splash/story and land on sign-in (App.jsx comment was not wired). */
+function initialIntroStep(sessionKey: string, variant: IntroFlowProps["variant"]): IntroStep {
+  const saved = readSessionStep(sessionKey);
+  if (saved) {
+    if (variant === "preOnboarding" && (saved === "get-started" || saved === "auth")) {
+      return "splash";
+    }
+    return saved;
+  }
+  if (variant !== "preOnboarding" && hasSeenIntroBefore()) {
+    return "auth";
+  }
+  return "splash";
+}
+
 /**
  * Top-level orchestrator for the intro flow.
  *
@@ -88,13 +111,7 @@ export function IntroFlow({ onComplete, variant = "signIn" }: IntroFlowProps) {
   const sessionKey =
     variant === "preOnboarding" ? SESSION_STEP_KEY_PRE_ONBOARD : SESSION_STEP_KEY_DEFAULT;
 
-  const [step, setStep] = useState<IntroStep>(() => {
-    const raw = readSessionStep(sessionKey) ?? "splash";
-    if (variant === "preOnboarding" && (raw === "get-started" || raw === "auth")) {
-      return "splash";
-    }
-    return raw;
-  });
+  const [step, setStep] = useState<IntroStep>(() => initialIntroStep(sessionKey, variant));
   const [authMode, setAuthMode] = useState<AuthMode>("signin");
 
   const markSeen = useCallback(() => {

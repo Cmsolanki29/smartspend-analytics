@@ -58,12 +58,17 @@ class AnomalyResponse(BaseModel):
 
 
 class HealthScoreResponse(BaseModel):
-    score: int = Field(ge=0, le=100)
-    grade: str
-    components: dict[str, Any]
-    trend: str
-    recommendations: list[str]
+    score: Optional[int] = Field(default=None, ge=0, le=100)
+    grade: str = ""
+    components: dict[str, Any] = Field(default_factory=dict)
+    trend: str = "STABLE"
+    recommendations: list[str] = Field(default_factory=list)
     savings_rate: Optional[float] = None
+    reason: Optional[str] = None
+    message: Optional[str] = None
+    days_needed: Optional[int] = None
+    days_available: Optional[int] = None
+    mode: Optional[str] = None
 
 
 class InsightResponse(BaseModel):

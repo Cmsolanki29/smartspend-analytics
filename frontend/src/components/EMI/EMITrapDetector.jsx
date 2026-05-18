@@ -28,7 +28,11 @@ import {
   postponePurchaseGoal,
   postPurchasePostponeGoal,
   scanEmi,
+  waitForBackendReady,
 } from "../../services/api";
+import { useViewMode } from "../../context/ViewModeContext";
+import { useFinancial } from "../../context/FinancialContext";
+import { EmptyState } from "../common/EmptyState";
 import { ErrorCard } from "../common/ErrorCard";
 import { useToast } from "../common/Toast";
 import { GlassCard } from "../intro/GlassCard";
@@ -76,6 +80,8 @@ function dispatchPurchaseGoalsChanged(userId) {
 }
 
 export default function EMITrapDetector({ userId }) {
+  const { viewMode } = useViewMode();
+  const { financialSummary, refreshFinancials } = useFinancial();
   const { showToast } = useToast();
   const [state, setState] = useState({ loading: true, error: "", data: null });
   const [cross, setCross] = useState({ loading: false, err: "", purchases: null, festivals: null, importantDays: null });
@@ -135,17 +141,30 @@ export default function EMITrapDetector({ userId }) {
   const load = useCallback(async () => {
     setState((p) => ({ ...p, loading: true, error: "" }));
     try {
-      const data = await getEmiReport(userId);
+      const ready = await waitForBackendReady(40000);
+      if (!ready) {
+        setState({
+          loading: false,
+          error:
+            "API is not reachable. Run .\\start-dev.ps1 (backend port 8002 + frontend), wait until healthy, then click Try Again.",
+          data: null,
+        });
+        return;
+      }
+      const data = await getEmiReport(userId, viewMode);
       setState({ loading: false, error: "", data });
+      refreshFinancials().catch(() => {});
       setCheckResult(null);
       setDismissSuggestion(false);
     } catch (err) {
-      const msg = err?.code === "ECONNABORTED" || err?.message?.includes("timeout")
-        ? "Backend is starting up. Please wait a moment and retry."
-        : err?.response?.data?.detail || err?.message || "Unable to load EMI Tracker";
+      const raw = err?.response?.data?.detail || err?.message || "Unable to load EMI Tracker";
+      const msg =
+        err?.code === "ECONNABORTED" || /timeout|network error/i.test(String(raw))
+          ? "Server is busy or still starting. Wait 20 seconds and click Try Again."
+          : raw;
       setState({ loading: false, error: msg, data: null });
     }
-  }, [userId]);
+  }, [userId, viewMode, refreshFinancials]);
 
   const loadCross = useCallback(async () => {
     setCross((c) => ({ ...c, loading: true, err: "" }));
@@ -163,12 +182,6 @@ export default function EMITrapDetector({ userId }) {
 
   useEffect(() => {
     load();
-  }, [load]);
-
-  useEffect(() => {
-    const handler = () => load();
-    window.addEventListener("dashboardModeChanged", handler);
-    return () => window.removeEventListener("dashboardModeChanged", handler);
   }, [load]);
 
   // Two-way sync: reload EMI report + cross-planner data when purchase goals or financial state changes

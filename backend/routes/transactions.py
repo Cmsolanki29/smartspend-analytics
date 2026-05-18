@@ -11,9 +11,10 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 
 from db import get_db
 from models.schemas import TransactionResponse
-from services.dashboard_scope import fetch_dashboard_mode, transaction_scope_sql
+from services.dashboard_scope import resolve_scope_mode, transaction_scope_sql
 from services.ml_model import ml_detector
-from services.categorizer import categorize_merchant, category_filter_sql, normalize_category
+from services.categorizer import category_filter_sql, normalize_category
+from services.transaction_upsert import enrich_transaction_row
 
 router = APIRouter(prefix="/transactions", tags=["transactions"])
 
@@ -80,6 +81,10 @@ def transaction_month_summary(
     user_id: int,
     month: Optional[int] = Query(None, ge=1, le=12),
     year: Optional[int] = Query(None, ge=2000, le=2100),
+    scope: Optional[str] = Query(
+        None,
+        description="bank_only | credit_card_only | merged",
+    ),
     conn=Depends(get_db),
 ):
     """Month-scoped totals for the Transactions KPI. Defaults to current calendar month."""
@@ -91,8 +96,8 @@ def transaction_month_summary(
     cur = None
     try:
         cur = conn.cursor()
-        mode = fetch_dashboard_mode(cur, user_id)
-        scope = transaction_scope_sql("transactions", mode)
+        mode = resolve_scope_mode(cur, user_id, scope)
+        scope_sql = transaction_scope_sql("transactions", mode)
         cur.execute(
             f"""
             SELECT
@@ -104,7 +109,7 @@ def transaction_month_summary(
             WHERE user_id = %s
               AND EXTRACT(MONTH FROM transaction_date)::int = %s
               AND EXTRACT(YEAR FROM transaction_date)::int = %s
-              AND ({scope});
+              AND ({scope_sql});
             """,
             (user_id, m, y),
         )
@@ -159,14 +164,18 @@ def list_transactions(
     connected_source_id: Optional[int] = Query(None, ge=1),
     uploaded_document_id: Optional[int] = Query(None, ge=1),
     limit: int = Query(50, ge=1, le=200),
+    scope: Optional[str] = Query(
+        None,
+        description="bank_only | credit_card_only | merged",
+    ),
     conn=Depends(get_db),
 ):
     """Transaction list — mode-aware, includes source_name/source_type for badges."""
     cur = None
     try:
         cur = conn.cursor()
-        mode = fetch_dashboard_mode(cur, user_id)
-        scope = transaction_scope_sql("t", mode)
+        mode = resolve_scope_mode(cur, user_id, scope)
+        scope_sql = transaction_scope_sql("t", mode)
         q = f"""
             SELECT t.id, t.user_id, t.transaction_date, t.transaction_time, t.amount, t.type,
                    t.description, t.merchant, t.category, t.payment_method, t.anomaly_flag,
@@ -176,7 +185,7 @@ def list_transactions(
             FROM transactions t
             LEFT JOIN connected_sources src
                    ON src.id = t.connected_source_id AND src.user_id = t.user_id
-            WHERE t.user_id = %s AND ({scope})
+            WHERE t.user_id = %s AND ({scope_sql})
         """
         params: list = [user_id]
         if month is not None and year is not None:
@@ -308,11 +317,19 @@ async def upload_csv(user_id: int, file: UploadFile = File(...), conn=Depends(ge
                     txn_type = "DEBIT"
                 merchant = str(row[c_merch]).strip() if c_merch and not pd.isna(row[c_merch]) else ""
                 desc = str(row[c_desc]).strip() if c_desc and not pd.isna(row[c_desc]) else None
-                cat = (
-                    str(row[c_cat]).strip()
-                    if c_cat and not pd.isna(row[c_cat])
-                    else categorize_merchant(merchant)
+                enriched = enrich_transaction_row(
+                    {
+                        "merchant": merchant or desc or "Unknown",
+                        "category": (
+                            str(row[c_cat]).strip()
+                            if c_cat and not pd.isna(row[c_cat])
+                            else None
+                        ),
+                    }
                 )
+                merchant = enriched["merchant"]
+                cat = enriched["category"]
+                normalized_merchant = enriched["normalized_merchant"]
                 hod = dt.hour
                 dow = dt.weekday()
                 wknd = dow >= 5
@@ -321,11 +338,11 @@ async def upload_csv(user_id: int, file: UploadFile = File(...), conn=Depends(ge
                     """
                     INSERT INTO transactions (
                         user_id, transaction_date, transaction_time, amount, type, description,
-                        merchant, category, subcategory, payment_method, location,
+                        merchant, normalized_merchant, category, subcategory, payment_method, location,
                         anomaly_flag, risk_score, risk_level, anomaly_reason, ml_processed,
                         hour_of_day, day_of_week, is_weekend, is_night_txn
                     ) VALUES (
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                         FALSE, 0, 'LOW', NULL, FALSE,
                         %s, %s, %s, %s
                     );
@@ -338,6 +355,7 @@ async def upload_csv(user_id: int, file: UploadFile = File(...), conn=Depends(ge
                         txn_type,
                         desc,
                         merchant or None,
+                        normalized_merchant,
                         cat,
                         "Imported",
                         "UPI",

@@ -64,7 +64,11 @@ def _device_type_from_method(method: str) -> str:
 # ── Behavior Profile ──────────────────────────────────────────────────────
 
 @router.get("/users/{user_id}/behavior-profile")
-async def get_behavior_profile(user_id: int) -> dict[str, Any]:
+async def get_behavior_profile(
+    user_id: int,
+    scope: str | None = None,
+    mode: str | None = None,
+) -> dict[str, Any]:
     """
     Phase 2 — Feature Store: user behavioural risk profile.
     Aggregates transaction history into login patterns, location analysis,
@@ -78,12 +82,15 @@ async def get_behavior_profile(user_id: int) -> dict[str, Any]:
     cutoff = datetime.now(timezone.utc) - timedelta(days=90)
 
     async with pool.acquire() as conn:
-        mode_row = await conn.fetchrow(
-            "SELECT COALESCE(dashboard_mode, 'merged') FROM users WHERE id = $1",
-            user_id,
-        )
-        mode = normalize_dashboard_mode(str(mode_row[0]) if mode_row else "merged")
-        scope = transaction_scope_sql("t", mode)
+        if scope or mode:
+            view = normalize_dashboard_mode(scope or mode)
+        else:
+            mode_row = await conn.fetchrow(
+                "SELECT COALESCE(dashboard_mode, 'merged') FROM users WHERE id = $1",
+                user_id,
+            )
+            view = normalize_dashboard_mode(str(mode_row[0]) if mode_row else "merged")
+        scope_sql = transaction_scope_sql("t", view)
 
         # 1. Hourly activity distribution (24 buckets)
         hourly_rows = await conn.fetch(
@@ -92,7 +99,7 @@ async def get_behavior_profile(user_id: int) -> dict[str, Any]:
                    COUNT(*) AS cnt
             FROM transactions t
             WHERE t.user_id = $1 AND t.transaction_date >= $2::date
-              AND ({scope})
+              AND ({scope_sql})
             GROUP BY hr
             ORDER BY hr
             """,
@@ -113,7 +120,7 @@ async def get_behavior_profile(user_id: int) -> dict[str, Any]:
                    SUM(CASE WHEN anomaly_flag THEN 1 ELSE 0 END) AS anomaly_cnt
             FROM transactions t
             WHERE t.user_id = $1 AND t.location IS NOT NULL AND t.location != ''
-              AND ({scope})
+              AND ({scope_sql})
             GROUP BY location
             ORDER BY cnt DESC
             LIMIT 10
@@ -143,7 +150,7 @@ async def get_behavior_profile(user_id: int) -> dict[str, Any]:
                    risk_level, anomaly_reason
             FROM transactions t
             WHERE t.user_id = $1 AND t.anomaly_flag = TRUE
-              AND ({scope})
+              AND ({scope_sql})
             ORDER BY transaction_date DESC, transaction_time DESC
             LIMIT 20
             """,
@@ -170,7 +177,7 @@ async def get_behavior_profile(user_id: int) -> dict[str, Any]:
                    transaction_date, transaction_time, anomaly_flag, type
             FROM transactions t
             WHERE t.user_id = $1
-              AND ({scope})
+              AND ({scope_sql})
             ORDER BY transaction_date DESC, transaction_time DESC
             LIMIT 10
             """,
@@ -199,7 +206,7 @@ async def get_behavior_profile(user_id: int) -> dict[str, Any]:
                    COUNT(*)                                       AS total
             FROM transactions t
             WHERE t.user_id = $1 AND t.transaction_date >= $2::date
-              AND ({scope})
+              AND ({scope_sql})
             """,
             user_id, cutoff.date(),
         )
@@ -250,7 +257,7 @@ async def get_devices(user_id: int) -> dict[str, Any]:
             user_id,
         )
         mode = normalize_dashboard_mode(str(mode_row[0]) if mode_row else "merged")
-        scope = transaction_scope_sql("t", mode)
+        scope_sql = transaction_scope_sql("t", mode)
         rows = await conn.fetch(
             f"""
             SELECT payment_method,
@@ -262,7 +269,7 @@ async def get_devices(user_id: int) -> dict[str, Any]:
                    AVG(risk_score)::float                        AS avg_risk
             FROM transactions t
             WHERE t.user_id = $1 AND t.payment_method IS NOT NULL
-              AND ({scope})
+              AND ({scope_sql})
             GROUP BY payment_method, location
             ORDER BY uses DESC
             LIMIT 12

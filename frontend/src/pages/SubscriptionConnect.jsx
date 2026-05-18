@@ -3,7 +3,7 @@ import { Link2, TrendingUp, Zap } from "lucide-react";
 import AppSelectionModal from "../components/Subscriptions/AppSelectionModal";
 import PermissionModal from "../components/Subscriptions/PermissionModal";
 import { GlassCard } from "../components/intro/GlassCard";
-import { clearSubscriptionFlow, setSubscriptionFlowConnected } from "../utils/subscriptionFlowStorage";
+import { setSubscriptionFlowConnected } from "../utils/subscriptionFlowStorage";
 import { useToast } from "../components/common/Toast";
 import { syncLinkedAppsToBackend } from "../services/subscriptionDeviceSync";
 
@@ -11,14 +11,14 @@ import { syncLinkedAppsToBackend } from "../services/subscriptionDeviceSync";
  * Step 1 — device link + connect flow (first-time users).
  * @param {object} props
  * @param {number} props.ownerId — JWT user id (must match API `/subscription-intelligence/{id}`)
- * @param {() => void} props.onComplete — after permissions granted + apps saved
+ * @param {() => void} props.onComplete — after permissions granted + apps saved (hub opens immediately)
  */
 export default function SubscriptionConnect({ ownerId, onComplete }) {
   const { showToast } = useToast();
   const [showApps, setShowApps] = useState(false);
   const [showPerm, setShowPerm] = useState(false);
   const [selectedIds, setSelectedIds] = useState([]);
-  const [busy, setBusy] = useState(false);
+  const [syncing, setSyncing] = useState(false);
 
   const handleAllow = async () => {
     if (!ownerId) {
@@ -26,31 +26,31 @@ export default function SubscriptionConnect({ ownerId, onComplete }) {
       return;
     }
     const ids = [...selectedIds];
+    if (ids.length === 0) {
+      showToast("Select at least one app, then try again.", "error");
+      return;
+    }
+
     setSubscriptionFlowConnected(ownerId, ids);
     setShowPerm(false);
+    setShowApps(false);
     setSelectedIds([]);
-    setBusy(true);
+    onComplete();
+
+    setSyncing(true);
     try {
-      const res = await syncLinkedAppsToBackend(ownerId);
-      if (!res?.ok && res?.reason === "bad_user") {
+      const res = await syncLinkedAppsToBackend(ownerId, ids);
+      if (res?.ok) {
+        showToast("Applications connected — intelligence data synced.", "success");
+      } else if (res?.reason === "bad_user") {
         showToast("Your account id is missing. Sign in again, then retry.", "error");
-        clearSubscriptionFlow(ownerId);
-        setBusy(false);
-        return;
+      } else {
+        showToast("Apps saved. Server sync will complete when the API is ready.", "info");
       }
-      if (!res?.ok && res?.reason === "no_apps") {
-        showToast("Select at least one app, then try again.", "error");
-        clearSubscriptionFlow(ownerId);
-        setBusy(false);
-        return;
-      }
-      showToast("Applications connected — intelligence data synced.", "success");
-      onComplete();
-    } catch (e) {
-      clearSubscriptionFlow(ownerId);
-      showToast(e?.message || "Could not sync to server. Check you are signed in, then retry.", "error");
+    } catch {
+      showToast("Apps linked on this device. Hub is ready — sync retries in the background.", "info");
     } finally {
-      setBusy(false);
+      setSyncing(false);
     }
   };
 
@@ -80,11 +80,12 @@ export default function SubscriptionConnect({ ownerId, onComplete }) {
 
           <button
             type="button"
+            disabled={syncing}
             onClick={() => setShowApps(true)}
-            className="mt-8 inline-flex items-center gap-3 rounded-2xl bg-gradient-to-r from-cyan-500 to-violet-600 px-10 py-4 text-base font-bold text-white shadow-xl shadow-cyan-500/25 transition hover:brightness-110"
+            className="mt-8 inline-flex items-center gap-3 rounded-2xl bg-gradient-to-r from-cyan-500 to-violet-600 px-10 py-4 text-base font-bold text-white shadow-xl shadow-cyan-500/25 transition hover:brightness-110 disabled:opacity-60"
           >
             <Zap className="h-5 w-5" aria-hidden />
-            Connect your subscriptions
+            {syncing ? "Syncing intelligence…" : "Connect your subscriptions"}
             <TrendingUp className="h-5 w-5" aria-hidden />
           </button>
 
@@ -110,6 +111,10 @@ export default function SubscriptionConnect({ ownerId, onComplete }) {
         variant="initial"
         onClose={() => setShowApps(false)}
         onConfirm={(ids) => {
+          if (!ids?.length) {
+            showToast("Select at least one app to continue.", "error");
+            return;
+          }
           setSelectedIds(ids);
           setShowApps(false);
           setShowPerm(true);

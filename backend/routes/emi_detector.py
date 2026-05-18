@@ -10,11 +10,11 @@ from datetime import date, datetime
 from statistics import median
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from db import get_db
-from services.dashboard_scope import fetch_dashboard_mode, transaction_scope_sql
+from services.dashboard_scope import fetch_dashboard_mode, resolve_scope_mode, transaction_scope_sql
 from services.emi_calculator import loan_summary
 from services.openai_service import call_gpt
 
@@ -245,11 +245,10 @@ def _danger_from_ratio(ratio: float) -> str:
     return "CRITICAL"
 
 
-def _build_emi_detection(conn, user_id: int) -> dict[str, Any]:
-    mode = "merged"
+def _build_emi_detection(conn, user_id: int, scope: str | None = None) -> dict[str, Any]:
     cur = conn.cursor()
     try:
-        mode = fetch_dashboard_mode(cur, user_id)
+        mode = resolve_scope_mode(cur, user_id, scope)
         scope = transaction_scope_sql("t", mode)
 
         cur.execute(
@@ -490,9 +489,16 @@ Give concise practical Indian personal-finance advice in 2-3 sentences.
 
 
 @router.get("/{user_id}")
-def get_emi_report(user_id: int, conn=Depends(get_db)):
+def get_emi_report(
+    user_id: int,
+    scope: str | None = Query(
+        None,
+        description="bank_only | credit_card_only | merged",
+    ),
+    conn=Depends(get_db),
+):
     try:
-        return _build_emi_detection(conn, user_id)
+        return _build_emi_detection(conn, user_id, scope)
     except HTTPException:
         raise
     except Exception as exc:

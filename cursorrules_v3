@@ -1,0 +1,564 @@
+# ============================================================
+# SMARTSPEND .cursorrules — COMPLETE RULES v3  (Pre-Deploy / Live)
+# READ EVERY RULE BEFORE TOUCHING ANY FILE
+# These apply to ALL users — new signups, existing, demo, everyone
+# ONE FIX = FIXED FOR EVERY USER, FOREVER.  NOT PER-USER, NOT TEMPORARY.
+# ============================================================
+
+
+# ================================================================
+# RULE 0 — THE GOLDEN RULE
+# ================================================================
+# Every change must work for:
+#   - user_id = 1   (brand new, 0 transactions)
+#   - user_id = 19  (test user)
+#   - user_id = 999 (future user not yet created)
+#
+# If your fix only works for one user → it is a bug, not a fix.
+# Before committing: mentally substitute any other user_id.
+# If logic breaks → rewrite generically.
+#
+# GLOBAL PERMANENCE RULE (NEW — RULE 0B):
+#   Every fix must be implemented at the LAYER where it is always enforced:
+#   - DB query logic → fix in query helper / ORM layer (not in the route)
+#   - Parsing logic  → fix in the parser / ingestion service (not the upload handler)
+#   - ML scoring     → fix in ml_model.py apply_score() (not the caller)
+#   - Frontend state → fix in global Context / store (not a single component)
+#   FORBIDDEN: one-off patches that only work for the current logged-in user.
+
+
+# ================================================================
+# RULE 1 — NO HARDCODED USER / SOURCE / INSTITUTION VALUES
+# ================================================================
+# NEVER: user_id = 19 | source_id = 64 | "Vikram" | amount = 21173
+# ALWAYS: user_id from URL param or auth token
+# EXCEPTIONS ONLY: /seed_data/  /demo_data/  /tests/
+#
+# Grep before every commit:
+#   grep -rn "user_id.*=.*19\|source_id.*64\|Vikram\|vikram" backend/ --include="*.py"
+
+
+# ================================================================
+# RULE 2 — ALL ROUTES: user_id FROM URL OR AUTH ONLY
+# ================================================================
+# CORRECT: @router.get("/{user_id}/dashboard")
+# CORRECT: user_id = current_user.id   (from Depends auth)
+# WRONG:   user_id = 19
+# WRONG:   if not user_id: user_id = 19
+
+
+# ================================================================
+# RULE 3 — SWITCH VIEW: ALL 8 MODULES UPDATE SIMULTANEOUSLY
+# ================================================================
+# On bank_only / card_only / merged switch → ALL must refetch:
+#   1.Dashboard  2.Transactions  3.FraudShield  4.Dark Patterns
+#   5.EMI Tracker  6.AI Insight  7.Festival Planner  8.Purchase Planner
+#
+# viewMode MUST be in global state (Context/Redux) — never local component
+# Every data component pattern:
+#   useEffect(() => { fetchData(userId, viewMode) }, [userId, viewMode])
+#
+# Every API endpoint: accepts ?mode= query param
+# Every query: uses transaction_scope_sql(user_id, mode)
+#
+# def transaction_scope_sql(user_id, mode):
+#     base = f"user_id = {user_id}"
+#     if mode == "bank_only":   return f"{base} AND source_type = 'bank'"
+#     elif mode == "card_only": return f"{base} AND source_type = 'credit_card'"
+#     else: return base   # merged = no extra filter
+
+
+# ================================================================
+# RULE 4 — FRAUD DETECTION: GLOBAL RULES FOR ALL USERS
+# ================================================================
+
+## 4A — CONTAMINATION SETTING
+#   IsolationForest(contamination=0.03)   ← use 0.03, NOT 0.06
+#   Lower contamination = fewer forced outliers = fewer false positives
+#   File: backend/services/ml_model.py (model initialisation line)
+
+## 4B — MINIMUM THRESHOLD TO SET anomaly_flag
+#   ONLY set anomaly_flag = True when BOTH conditions met:
+#     (a) predict == -1  (IsolationForest says outlier)
+#     (b) risk_score >= 50
+#
+#   Code (apply everywhere anomaly_flag is written to DB):
+#     anomaly_flag = (predict == -1) and (risk_score >= 50)
+#
+#   If risk_score < 50 → anomaly_flag = False, even if model predicts -1
+
+## 4C — MERCHANT TRUST RULE  (fixes Swiggy / Zomato false positives)
+#   Before scoring ANY transaction, check merchant frequency:
+#
+#     merchant_key = normalize_merchant(transaction.merchant)
+#     count_90d = SELECT COUNT(*) FROM transactions
+#                 WHERE user_id = :uid
+#                   AND normalized_merchant = :merchant_key
+#                   AND amount < 0          -- debits only
+#                   AND date >= NOW() - 90 days
+#
+#     if count_90d >= 5:
+#         risk_score = min(risk_score, 30)
+#         anomaly_flag = False
+#
+#   normalize_merchant function:
+#     - lowercase
+#     - strip punctuation and trailing numbers
+#     - take first significant word
+#     Examples:
+#       "SWIGGY*ORDER123"    → "swiggy"
+#       "Zomato Food Pvt"    → "zomato"
+#       "AMAZON PAY 9283"    → "amazon"
+#       "Netflix.com"        → "netflix"
+#
+#   Store normalized_merchant column in transactions table
+#   Backfill on first run for existing users
+
+## 4D — UI SEVERITY DISPLAY RULES  (Frontend — applies to ALL users)
+#   risk_score >= 70 (HIGH/CRITICAL) → red badge   "Fraud Alert"
+#   risk_score 50-69 (MEDIUM)        → yellow badge "Unusual Spend"
+#   risk_score < 50  (LOW)           → NOT shown in alerts list
+#                                       greyed/italic in transactions only
+#
+#   Label rules by alert type:
+#     ML_ANOMALY   → "Unusual spend for you"   (never "Fraud Detected")
+#     SCAM/PHISH   → "Fraud Alert"
+#     RULE_BASED HIGH → "Suspicious Transaction"
+#
+#   NEVER show every anomaly_flag=True as a red scary alert
+
+## 4E — ML MODEL: PER-USER STRICTLY
+#   - Model dict keyed by user_id: models = { user_id: IsolationForest }
+#   - Train only on this user's transactions
+#   - Score only with this user's model
+#   - Retrain trigger: upload complete AND user total debits >= 30
+#   - If < 30 debits: store data, show "Building your baseline..." in UI
+#   - Missing model → rule-based fallback, return { ml_ready: false }
+
+## 4F — 9TH FEATURE: merchant_debit_count_90d
+#   Add to feature vector as 9th feature:
+#     log1p(count of same-merchant debits in past 90 days for this user)
+#   This teaches the model: frequent merchant = lower anomaly score
+#   Backfill when retraining existing users
+
+## 4G — CATEGORY NORMALISATION (at parse time, for ALL uploads)
+#   Normalise merchant → category BEFORE storing to DB.
+#   This runs in the PARSER, not the upload handler — so it applies to
+#   bank links, PDF uploads, CSV uploads, and credit card uploads equally.
+#
+#   CANONICAL MAP (case-insensitive, match on normalized_merchant prefix):
+#     swiggy, zomato, eatsure, blinkit, zepto, bigbasket  → "Food"
+#     amazon, flipkart, myntra, meesho, ajio, snapdeal     → "Shopping"
+#     uber, ola, rapido, yulu, bounce                      → "Transport"
+#     netflix, spotify, hotstar, primevideo, youtube premium → "Entertainment"
+#     byju, unacademy, coursera, udemy, vedantu            → "Education"
+#     1mg, pharmeasy, apollo pharmacy, medplus             → "Health"
+#     irctc, makemytrip, yatra, goibibo, cleartrip         → "Travel"
+#     phonepe, googlepay, paytm, gpay                      → "UPI Transfer"
+#   Never store "MISC" if merchant is recognisable.
+#   Parser location: backend/services/parser_utils.py → enrich_category()
+#   Call enrich_category() on EVERY transaction before upsert to DB.
+
+
+# ================================================================
+# RULE 5 — CONNECTED ACCOUNTS: DATA FLOWS TO ALL SECTIONS
+# ================================================================
+# When user connects an account OR uploads (PDF/CSV/bank stmt):
+# ALL sections MUST reflect updated data. No section left stale.
+
+## 5A — Upload/Connect pipeline (runs for EVERY user on every upload):
+#   Step 1: Parse → extract transactions
+#   Step 2: enrich_category() on each transaction (Rule 4G)
+#   Step 3: Store with source_id, user_id, source_type, normalized_merchant, category
+#   Step 4: Score each transaction (rule-based + ML if model exists)
+#   Step 5: Apply merchant trust rule (Rule 4C) before saving anomaly_flag
+#   Step 6: Run dark pattern detection on new batch
+#   Step 7: Detect EMI patterns from new transactions
+#   Step 8: Retrain ML if total debits >= 30
+#   Step 9: Recalculate health score
+#   Step 10: WebSocket emit to user's room → "data_updated"
+#
+#   Frontend on "data_updated":
+#     → Refetch ALL 8 modules (not just dashboard)
+#     → Toast: "Your [SourceName] data is ready!"
+
+## 5B — FraudShield: ALL 4 sub-tabs use connected account data
+#
+#   ALERTS tab:
+#     - Alerts from all connected sources (filtered by viewMode)
+#     - Each alert: source name, account type, merchant, amount, risk_score
+#     - Severity from Rule 4D (HIGH=red, MEDIUM=yellow, LOW=hidden)
+#     - Empty state: "No alerts from your connected accounts"
+#
+#   BEHAVIOUR tab:
+#     - Spend by time-of-day heatmap (from actual transactions)
+#     - Top merchants by frequency and amount
+#     - Weekday vs weekend spend pattern
+#     - Source filter: matches current viewMode
+#     - Empty state: "Upload statements to see behaviour patterns"
+#
+#   DEVICES tab:
+#     - Login device history from auth logs
+#     - Never show fake/demo device data
+#     - If no data: "Device tracking available after 30 days"
+#
+#   INVESTIGATION tab:
+#     - Drill-down on flagged transactions (anomaly_flag=True, risk>=50)
+#     - Shows: merchant, amount, date, category, risk_score, why_flagged
+#     - Link to original transaction in Transactions list
+#     - Empty: "No transactions under investigation"
+#
+#   All 4 tabs MUST be populated from real connected account transactions.
+#   NEVER show empty tab when there is uploaded data.
+
+## 5C — Dark Patterns: populated from connected account data
+#   Run detection on all transactions for this user+viewMode
+#   Pattern types:
+#     - Subscription creep (recurring amount increasing over time)
+#     - Trial trap (small first charge → large recurring)
+#     - Hidden fees (charge differs from expected amount)
+#     - Impulse triggers (late night / weekend clustering)
+#   Each pattern: merchant, amount, frequency, source account name
+#   Empty state: "No dark patterns detected in your transactions"
+#   NEVER empty when user has uploaded transactions
+
+## 5D — API: source-aware endpoints
+#   GET /api/{user_id}/fraud-alerts?mode=merged
+#   GET /api/{user_id}/dark-patterns?mode=bank_only
+#   GET /api/{user_id}/behaviour?mode=merged
+#   GET /api/{user_id}/transactions?mode=merged&page=1
+#   All filter by user_id + mode. Never hardcode source_id.
+
+## 5E — WebSocket: user-specific rooms only
+#   CORRECT: socketio.emit(event, data, room=f"user_{user_id}")
+#   WRONG:   socketio.emit(event, data)
+#   WRONG:   room="all_users"
+
+
+# ================================================================
+# RULE 6 — AI INSIGHT: ALWAYS REFLECTS CONNECTED DATA
+# ================================================================
+
+## 6A — Health Score
+#   Recalculates after every upload/connect for this user
+#   Components: savings_rate, emi_burden, fraud_risk, consistency, dark_patterns
+#   All from real DB data (user_id + viewMode filtered)
+#   < 10 transactions: score = null → "Not enough data yet"
+#   >= 10 transactions: real computed score
+#   Updates when viewMode changes (different scope = different score)
+
+## 6B — AI Summary
+#   Auto-regenerates after upload pipeline completes
+#   Mentions: source name, top spend category, anomalies, health delta
+#   0 transactions: "Upload a statement or link an account to begin"
+
+## 6C — Chatbot: username + bank validation (ALL users)
+#   Init: fetch user profile → get first name + linked accounts list
+#   On viewMode change: reset context, note new mode
+#   On doc upload: run CASE A/B/C logic:
+#
+#     CASE A — doc institution IN user's linked accounts:
+#       → Full analysis, all 5 feature buttons, greet by first name
+#       → Feature buttons NEVER disappear after reply
+#
+#     CASE B — doc name matches user but institution NOT linked:
+#       → Brief insight + "Link [BankName] for full analysis"
+#       → Show Link Account button, limited feature buttons
+#
+#     CASE C — doc belongs to different person:
+#       → Politely refuse, show Settings button
+#       → Never analyze someone else's data
+#
+#   Feature buttons persist throughout session — never clear on reply
+
+
+# ================================================================
+# RULE 7 — EMI ↔ FESTIVAL ↔ PURCHASE PLANNER LIVE LINKING
+# ================================================================
+# Shared state via /api/{user_id}/financial-summary?mode=
+# Response always returns (never null, default 0 / []):
+#   { monthly_income, monthly_emi_total, active_emis[],
+#     festival_reserved, projected_monthly_emi, available_for_purchase }
+#
+# When any module writes data → call refreshFinancials()
+# New user: monthly_emi_total = 0, active_emis = []  (never crash)
+# Safe display: const amt = data?.monthly_emi_total ?? 0
+
+
+# ================================================================
+# RULE 8 — EMPTY STATE HANDLING
+# ================================================================
+# Dashboard:     "Upload your first bank statement to get started"
+# Transactions:  "No transactions yet. Upload a statement to begin."
+# FraudShield:   "No suspicious activity detected 🎉"
+#   Alerts tab:  "No alerts from your connected accounts"
+#   Behaviour:   "Upload statements to see behaviour patterns"
+#   Devices:     "Device tracking available after 30 days"
+#   Investigation: "No transactions under investigation"
+# Dark Patterns: "No dark patterns detected in your transactions"
+# EMI Tracker:   "No EMIs detected yet"
+# AI Insight:    "Link an account or upload a statement to start"
+# Health Score:  "Complete your first month to get your Health Score"
+#
+# formatCurrency helper (use everywhere):
+#   const formatCurrency = (n) => `₹${(Number(n) || 0).toLocaleString('en-IN')}`
+
+
+# ================================================================
+# RULE 9 — DATABASE QUERIES: USER FILTER ALWAYS
+# ================================================================
+# Every SELECT: WHERE user_id = :user_id  (parameterised)
+# Every INSERT: include user_id
+# Every UPDATE: WHERE user_id = :uid AND id = :id
+# Every DELETE: WHERE user_id = :uid AND id = :id
+# FORBIDDEN:    SELECT * FROM transactions   (no user filter)
+
+
+# ================================================================
+# RULE 10 — ERROR HANDLING
+# ================================================================
+# NEVER show: stack traces, SQL errors, NoneType, KeyError
+# ALWAYS show: "Something went wrong. Tap to retry." + retry button
+# Backend: try/except every route → JSONResponse 400 with message
+# Frontend: try/catch every fetch → setError("Could not load. Tap to retry.")
+
+
+# ================================================================
+# RULE 11 — NO DEMO / FAKE DATA IN PRODUCTION
+# ================================================================
+# Never: hardcoded amounts, fake alerts, demo health scores
+# Always: real DB data or honest empty state
+# ML not trained: "Building your baseline..." not fake score
+# Feature not ready: "Coming soon" not fake demo
+
+
+# ================================================================
+# RULE 12 — SIGN UP / LOGIN STATE MANAGEMENT
+# ================================================================
+# On login: fetch + store userId, userProfile, linkedAccounts, viewMode
+# Default viewMode for new users: "merged"
+# On logout: clear ALL global state + localStorage
+# Never leak one user's data to next user on same device
+
+
+# ================================================================
+# RULE 14 — NEW USER ONBOARDING: ZERO ASSUMPTIONS (NEW)
+# ================================================================
+# A new user who just signed up has NO data, NO ghost rows, NO previous state.
+# The app must NEVER crash or show another user's data for a new signup.
+
+## 14A — Two onboarding paths — BOTH fully supported:
+#
+#   PATH 1 — Bank Link (ghost DB accounts pre-created):
+#     - User selects a bank from the link-bank screen
+#     - Backend returns the pre-seeded ghost account for that user+bank combo
+#     - Frontend shows dashboard populated with that account's transactions
+#     - source_type = 'bank', source_id = <ghost account id for THIS user>
+#     - Ghost accounts: ALWAYS scoped per user_id. Never share between users.
+#
+#   PATH 2 — Document Upload (bank PDF / credit card PDF / CSV):
+#     - User uploads a document on the connect-accounts screen
+#     - Agentic AI pipeline extracts transactions (Rule 5A applies)
+#     - On success: pipeline emits "data_updated" WebSocket event for THIS user
+#     - Frontend refetches ALL 8 modules from real extracted data
+#     - source_type = 'bank_pdf' | 'credit_card_pdf' | 'csv'
+#     - NOTHING from another user is ever shown
+#
+#   FORBIDDEN after either path:
+#     - Showing placeholder/demo/ghost data from a different user
+#     - Showing empty sections when real data exists
+#     - Crashing because user has no prior history
+
+## 14B — Ghost / pre-seeded accounts rule:
+#   Ghost accounts in DB MUST always have user_id column set to the actual user.
+#   NEVER create ghost accounts with user_id = NULL or user_id = 0 or shared.
+#   Schema: accounts(id, user_id, institution, source_type, is_ghost)
+#   Query:  SELECT * FROM accounts WHERE user_id = :uid AND is_ghost = true
+#   Ghost rows are PER USER. If 5 ghost banks exist → each is tied to THAT user.
+
+## 14C — Connect Accounts screen rules:
+#   - After PATH 1 or PATH 2 completes → redirect to Dashboard
+#   - Dashboard fetches from: GET /api/{user_id}/dashboard?mode=merged
+#   - ALL 8 modules auto-populate from the linked/uploaded source
+#   - Connected Accounts section: lists only THIS user's accounts
+#   - "Add account" always available regardless of existing count
+
+## 14D — No stale data between sessions / users:
+#   - On logout: clear all in-memory state, tokens, cached API responses
+#   - On next login: fresh fetch for the new user_id
+#   - Never use cached data from the previous user's session
+
+
+# ================================================================
+# RULE 15 — DOCUMENT UPLOAD → FULL APP REFLECTION (NEW)
+# ================================================================
+# When a user uploads bank PDF, credit card PDF, or CSV:
+# The extracted data MUST appear in EVERY section of the app.
+# No section is exempt. No manual refresh required.
+
+## 15A — Sections that MUST update after every upload (for ALL users):
+#   1.  Dashboard           — balance, spend summary, health score
+#   2.  Transactions        — full list with category, merchant, amount
+#   3.  FraudShield Alerts  — new anomaly flags from upload
+#   4.  FraudShield Behaviour — heatmap, top merchants, patterns
+#   5.  FraudShield Devices  — (auth logs only, not from upload)
+#   6.  FraudShield Investigation — flagged tx from new upload
+#   7.  Dark Patterns       — subscription creep, trial traps, etc.
+#   8.  EMI Tracker         — newly detected EMI patterns
+#   9.  AI Insight Summary  — regenerated with new source name
+#   10. AI Health Score     — recalculated
+#   11. AI Chatbot context  — aware of new upload, answers from it
+#   12. Festival Planner    — updated available budget
+#   13. Purchase Planner    — updated affordability
+#
+#   Trigger mechanism: WebSocket "data_updated" event (Rule 5A Step 10)
+#   Frontend listener (global, mounted once at app root):
+#     socket.on("data_updated", ({ user_id, source_name }) => {
+#       if (user_id === currentUserId) {
+#         refetchAll();   // calls all 8+ module fetch functions
+#         showToast(`${source_name} data loaded!`);
+#       }
+#     });
+
+## 15B — Document parsing pipeline MUST return structured data:
+#   {
+#     source_name: "HDFC Bank",
+#     source_type: "bank_pdf" | "credit_card_pdf" | "csv",
+#     transaction_count: 142,
+#     date_range: { from: "2024-01-01", to: "2024-03-31" },
+#     status: "success" | "partial" | "failed",
+#     errors: []   // empty array on success
+#   }
+#   Frontend shows this in upload confirmation card — not a raw API dump.
+
+## 15C — Error states during upload (show to user, never crash):
+#   - PDF password protected: "This PDF is password-protected. Please remove the password and re-upload."
+#   - Unreadable format: "We couldn't read this file. Try a different format."
+#   - No transactions found: "No transactions found in this document."
+#   - Partial extraction: "Extracted N transactions. Some pages may have been unreadable."
+#   All errors: shown in UI toast + logged to backend (never surfaced as stack trace)
+
+
+# ================================================================
+# RULE 16 — FRAUDSHIELD: EVERY TAB POPULATED FROM REAL DATA (NEW)
+# ================================================================
+# FraudShield has 4 tabs. ALL 4 must show data from connected accounts.
+# "Not enough data" is acceptable. Empty because of a bug is NOT.
+
+## 16A — Alerts tab data contract:
+#   GET /api/{user_id}/fraud-alerts?mode={viewMode}
+#   Returns: [{ id, merchant, amount, date, risk_score, severity, alert_type,
+#               why_flagged, source_name, source_type }]
+#   Frontend renders:
+#     HIGH (>=70)   → red card, "Fraud Alert", shown at top
+#     MEDIUM (50-69)→ yellow card, "Unusual Spend"
+#     LOW (<50)     → NOT in alerts list (only greyed row in Transactions)
+#   Empty: "No alerts from your connected accounts"
+
+## 16B — Behaviour tab data contract:
+#   GET /api/{user_id}/behaviour?mode={viewMode}
+#   Returns: {
+#     hourly_heatmap: [{ hour: 0-23, amount, count }],
+#     top_merchants:  [{ merchant, amount, count }],
+#     weekday_spend:  [{ day: "Mon", amount }],
+#     weekend_spend:  [{ day: "Sat", amount }]
+#   }
+#   Empty: "Upload statements to see behaviour patterns"
+
+## 16C — Investigation tab data contract:
+#   GET /api/{user_id}/investigation?mode={viewMode}
+#   Returns: [{ id, merchant, amount, date, risk_score, why_flagged,
+#               category, source_name, transaction_id }]
+#   Only includes: anomaly_flag=True AND risk_score >= 50
+#   Empty: "No transactions under investigation"
+
+## 16D — FraudShield viewMode dependency:
+#   All 4 tabs re-fetch when viewMode changes (same as Rule 3)
+#   Tab state does NOT persist across viewMode changes
+
+
+# ================================================================
+# RULE 17 — DARK PATTERNS: POPULATED FROM CONNECTED DATA (NEW)
+# ================================================================
+# Dark pattern detection runs on upload pipeline completion (Rule 5A Step 6)
+# and also on demand via:
+#   GET /api/{user_id}/dark-patterns?mode={viewMode}
+#
+# Returns: [{ id, pattern_type, merchant, amount, frequency,
+#              first_seen, last_seen, source_name }]
+# pattern_type values: "subscription_creep" | "trial_trap" |
+#                      "hidden_fee" | "impulse_trigger"
+#
+# Frontend: shows each pattern card with:
+#   - Pattern name (human-readable, e.g. "Subscription Price Increase")
+#   - Merchant name (normalised)
+#   - Amount trend (e.g. "₹99 → ₹149 → ₹199")
+#   - Source account name
+#   - CTA: "Review subscription" button
+#
+# NEVER empty when user has transactions; always run detection post-upload.
+
+
+# ================================================================
+# RULE 18 — AI INSIGHT: FULL SECTION COVERAGE (NEW)
+# ================================================================
+
+## 18A — AI Summary regeneration triggers:
+#   - After every upload/connect (pipeline Step 10)
+#   - After viewMode change
+#   - After health score recalculation
+#   Summary prompt must include: top_category, total_spend, anomaly_count,
+#     health_score, dark_patterns_count, source_names[], date_range
+
+## 18B — Health Score: always reflects latest data
+#   Components (weights):
+#     savings_rate      25%  — income vs spend ratio
+#     emi_burden        20%  — EMI / income ratio
+#     fraud_risk        25%  — anomaly_flag rate, risk_score avg
+#     consistency       15%  — spend variance month-over-month
+#     dark_patterns     15%  — count of active dark patterns
+#   Score: 0–100. Shown as gauge + colour (red<40, yellow 40-70, green>70)
+#   Recalculates in background after pipeline completes (no manual refresh)
+
+## 18C — AI Chatbot: context always from connected account data
+#   On init:  load user's linked sources list into system prompt
+#   On upload: append new source to context, do NOT reset conversation
+#   Chatbot answers MUST reference actual transaction data (via tool/RAG)
+#   Never hallucinate amounts, merchants, or dates
+#   Feature buttons (5): "Spending Summary" | "Fraud Check" | "EMI Review"
+#                        "Dark Patterns" | "Health Score"
+#   Buttons re-render after every reply — never disappear
+
+
+# ================================================================
+# RULE 13 — PRE-DEPLOY TESTING CHECKLIST  (updated)
+# ================================================================
+# Users:  [ ] new (0 txns) [ ] bank only [ ] bank+card [ ] user 19
+# Views:  [ ] bank_only [ ] card_only [ ] merged [ ] switch between all
+#         [ ] every switch: all 8 modules update
+# Upload: [ ] bank PDF [ ] credit card PDF [ ] CSV
+#         [ ] after upload: Dashboard ✓ Transactions ✓ FraudShield ALL 4 TABS ✓
+#                          Dark Patterns ✓ EMI ✓ AI Insight ✓ Health Score ✓
+#         [ ] FraudShield all 4 tabs show data from upload
+# Fraud:  [ ] Swiggy NOT flagged (merchant trust rule)
+#         [ ] risk_score < 50 = not flagged
+#         [ ] HIGH = red "Fraud Alert"
+#         [ ] MEDIUM = yellow "Unusual Spend"
+#         [ ] LOW = greyed in tx list only
+# AI:     [ ] CASE A/B/C all work for any user
+#         [ ] feature buttons persist after every reply
+#         [ ] health score updates after upload
+#         [ ] chatbot uses first name
+#         [ ] AI summary mentions correct source name
+# Dark:   [ ] dark patterns populated after upload
+#         [ ] no empty dark patterns tab when data exists
+# New user: [ ] signup → link bank (ghost path) → dashboard shows bank data
+#           [ ] signup → upload PDF/CSV → dashboard shows extracted data
+#           [ ] no demo/other user data shown
+#           [ ] no crashes on fresh account
+#           [ ] connected accounts section shows only this user's accounts
+# Empty:  [ ] no NaN anywhere [ ] no crashes [ ] clean empty states
+
+# ================================================================
+# END — SmartSpend .cursorrules v3  |  Apply to every file always
+# ================================================================

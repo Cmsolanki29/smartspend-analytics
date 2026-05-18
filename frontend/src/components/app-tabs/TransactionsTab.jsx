@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { useViewMode } from "../../context/ViewModeContext";
 import { getTransactionSummary, getAnomalyStats } from "../../services/api";
 import { PageHeader } from "../Dashboard/shared/PageHeader";
 import { HeroKpiTile } from "../Dashboard/shared/HeroKpiTile";
@@ -7,24 +8,17 @@ import TransactionTable from "../Transactions/TransactionTable";
 const ACCENT = "#22D3EE";
 
 export default function TransactionsTab({ userId, month, year }) {
+  const { viewMode } = useViewMode();
   const [summary, setSummary] = useState(null);
   const [anomalies, setAnomalies] = useState(null);
   const [loading, setLoading] = useState(true);
-  // Bumped when dashboardModeChanged fires — causes useEffect below to re-run.
-  const [modeVersion, setModeVersion] = useState(0);
-
-  useEffect(() => {
-    const handler = () => setModeVersion((v) => v + 1);
-    window.addEventListener("dashboardModeChanged", handler);
-    return () => window.removeEventListener("dashboardModeChanged", handler);
-  }, []);
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     Promise.allSettled([
-      getTransactionSummary(userId, { month, year }),
-      getAnomalyStats(userId),
+      getTransactionSummary(userId, { month, year, scope: viewMode }),
+      getAnomalyStats(userId, viewMode),
     ]).then(([sumRes, anomRes]) => {
       if (cancelled) return;
       setSummary(sumRes.status === "fulfilled" ? sumRes.value : null);
@@ -32,8 +26,7 @@ export default function TransactionsTab({ userId, month, year }) {
       setLoading(false);
     });
     return () => { cancelled = true; };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [userId, month, year, modeVersion]);
+  }, [userId, month, year, viewMode]);
 
   const count = summary?.transaction_count ?? summary?.total_count ?? summary?.count ?? 0;
   const anomCount =

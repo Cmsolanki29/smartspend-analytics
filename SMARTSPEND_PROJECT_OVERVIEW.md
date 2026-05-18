@@ -1,5 +1,5 @@
 # SmartSpend — Complete Project Overview
-### AI-Powered Personal Finance OS for India
+### AI-Powered Personal Finance OS (Global)
 **Tagline:** *Your money, intelligently shielded.*  
 **Repo / codebase name:** Exiqo  
 **Prepared for:** AI Biz Impact Eval — *AI for Business Impact (Open Track)*  
@@ -29,7 +29,7 @@
 
 ## 1. Executive Summary
 
-**SmartSpend** is an end-to-end **AI-native personal finance platform** built for Indian users. It connects bank and credit-card data (via statement upload or Account Aggregator-style onboarding), then layers **machine learning, rules engines, and large language models (LLMs)** on top of real transaction data to deliver:
+**SmartSpend** is an end-to-end **AI-native personal finance platform** for global consumers. It connects bank and credit-card data (via statement upload or open-banking-style onboarding), then layers **machine learning, rules engines, and large language models (LLMs)** on top of real transaction data to deliver:
 
 - **Spend visibility** — dashboard, health score, category trends, multi-source breakdown (bank vs credit card)
 - **Proactive protection** — 12-phase FraudShield (anomaly detection, pre-payment scanner, investigation console)
@@ -53,7 +53,7 @@ Unlike a simple expense tracker, SmartSpend treats personal finance as a **unifi
 | **Fragmented data** | Bank app + card app + no unified picture | PDF/CSV upload, connected sources, merged dashboard scope |
 | **Generic AI advice** | ChatGPT doesn’t know your transactions | AI chat + insights grounded in compressed user context from PostgreSQL |
 
-**Target users:** Salaried professionals, Gen-Z earners, and families in India managing UPI-heavy, multi-account finances.
+**Target users:** Salaried professionals, Gen-Z earners, and families managing digital payments, subscriptions, and multi-account finances worldwide.
 
 ---
 

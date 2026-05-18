@@ -4,12 +4,34 @@
 # problem from happening again.
 #
 # Usage:
-#   .\start-backend.ps1            # uses port 8001 (must match frontend/package.json "proxy")
+#   .\start-backend.ps1            # uses port 8002 (must match frontend setupProxy / package.json "proxy")
 #   .\start-backend.ps1 -Port 8000 # use a different port
 
 param(
-    [int]$Port = 8002
+    [int]$Port = 8002,
+    [switch]$Reload
 )
+
+if ($Port -eq 8001) {
+    Write-Host '[start-backend] WARNING: Port 8001 is outdated. Use port 8002 for Purchase/Festival APIs.' -ForegroundColor Red
+    Write-Host '[start-backend] Run: .\start-backend.ps1 -Port 8002' -ForegroundColor Yellow
+}
+
+# Stop stale backends on the other default port (avoids CRA proxy hitting old code on 8001).
+foreach ($stalePort in @(8001, 8002)) {
+    if ($stalePort -eq $Port) { continue }
+    Write-Host "[start-backend] Freeing stale port $stalePort ..." -ForegroundColor Yellow
+    try {
+        $netstat = netstat -ano 2>$null | Select-String "LISTENING" | Select-String ":$stalePort\s"
+        foreach ($line in $netstat) {
+            $tokens = ($line.ToString() -split "\s+") | Where-Object { $_ -ne "" }
+            $procId = $tokens[-1]
+            if ($procId -match '^\d+$' -and [int]$procId -ne 0) {
+                Stop-Process -Id ([int]$procId) -Force -ErrorAction SilentlyContinue
+            }
+        }
+    } catch { }
+}
 
 # 0) Stop every python process whose command line is uvicorn targeting this port
 #    (netstat PIDs can be stale on Windows; this catches system Python + stray workers.)
@@ -82,6 +104,15 @@ if ($nodeCount -gt 10) {
 }
 
 Write-Host "[start-backend] Starting uvicorn on http://127.0.0.1:$Port ..." -ForegroundColor Green
+
+$portFile = Join-Path $PSScriptRoot "frontend\.backend-port"
+try {
+    Set-Content -Path $portFile -Value "$Port" -Encoding ascii -NoNewline
+    Write-Host "[start-backend] Wrote $portFile (frontend proxy will use port $Port)" -ForegroundColor Cyan
+} catch {
+    Write-Host "[start-backend] Could not write $portFile : $_" -ForegroundColor Yellow
+}
+
 Set-Location -Path "$PSScriptRoot\backend"
 Write-Host "[start-backend] Clearing Python __pycache__ (avoid stale .pyc)..." -ForegroundColor Cyan
 Get-ChildItem -Path . -Recurse -Directory -Filter __pycache__ -ErrorAction SilentlyContinue |
@@ -92,6 +123,12 @@ $venvPy = Join-Path (Get-Location) ".venv\Scripts\python.exe"
 $py = if (Test-Path -LiteralPath $venvPy) { $venvPy } else { "python" }
 Write-Host "[start-backend] Using Python: $py" -ForegroundColor Cyan
 
+# ML warmup blocks HTTP for minutes on first boot — skip for fast local dev (set in .env for prod if needed).
+if (-not $env:SMARTSPEND_SKIP_ML_WARMUP) {
+    $env:SMARTSPEND_SKIP_ML_WARMUP = "1"
+    Write-Host "[start-backend] SMARTSPEND_SKIP_ML_WARMUP=1 (API ready in seconds)" -ForegroundColor Cyan
+}
+
 Write-Host "[start-backend] Applying pending SQL migrations (e.g. OTP timestamptz)..." -ForegroundColor Cyan
 & $py -m scripts.apply_migrations
 if ($LASTEXITCODE -ne 0) {
@@ -99,9 +136,39 @@ if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
-if (Test-Path -LiteralPath $venvPy) {
-    & $venvPy -m uvicorn main:app --host 127.0.0.1 --port $Port --reload
+# Ghost LISTENING rows on Windows can block the port while no process exists — try next port once.
+$bindPort = $Port
+$maxPortTry = 3
+for ($try = 0; $try -lt $maxPortTry; $try++) {
+    $probe = $bindPort + $try
+    try {
+        $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $probe)
+        $listener.Start()
+        $listener.Stop()
+        $bindPort = $probe
+        break
+    } catch {
+        Write-Host "[start-backend] Port $probe appears blocked (ghost or in use). Trying $($probe + 1)..." -ForegroundColor Yellow
+        $bindPort = $probe + 1
+    }
+}
+if ($bindPort -ne $Port) {
+    Write-Host "[start-backend] Using port $bindPort instead of $Port (update frontend proxy via .backend-port)" -ForegroundColor Yellow
+    try {
+        Set-Content -Path $portFile -Value "$bindPort" -Encoding ascii -NoNewline
+    } catch { }
+}
+
+$uvicornArgs = @("main:app", "--host", "127.0.0.1", "--port", "$bindPort")
+if ($Reload) {
+    Write-Host "[start-backend] --reload enabled (may spawn zombie workers on Windows)" -ForegroundColor Yellow
+    $uvicornArgs += "--reload"
 } else {
-    # Bare `uvicorn` is often not on PATH; -m works when the package is installed for this Python.
-    & $py -m uvicorn main:app --host 127.0.0.1 --port $Port --reload
+    Write-Host "[start-backend] Single worker (no --reload) for stable local dev" -ForegroundColor Cyan
+}
+
+if (Test-Path -LiteralPath $venvPy) {
+    & $venvPy -m uvicorn @uvicornArgs
+} else {
+    & $py -m uvicorn @uvicornArgs
 }

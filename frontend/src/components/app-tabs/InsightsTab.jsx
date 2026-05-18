@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from "react";
-import { useAuth } from "../../context/AuthContext";
+import { useViewMode } from "../../context/ViewModeContext";
 import { getHealthScore } from "../../services/api";
 import { PageHeader } from "../Dashboard/shared/PageHeader";
 import { HeroKpiTile } from "../Dashboard/shared/HeroKpiTile";
@@ -9,30 +9,13 @@ import SmartSpendChatbot from "../AIChat/SmartSpendChatbot";
 
 const ACCENT = "#A78BFA";
 
-function resolveDashboardMode(user, event) {
-  const fromEvent = event?.detail?.mode;
-  if (fromEvent && String(fromEvent).trim()) return String(fromEvent).trim();
-  return user?.dashboard_mode || "merged";
-}
-
 /** `setActiveTab` — same tab switcher as Sidebar (CRA has no react-router-dom). */
 export default function InsightsTab({ userId, month, year, setActiveTab }) {
-  const { user } = useAuth();
-  const [dashboardMode, setDashboardMode] = useState(() => user?.dashboard_mode || "merged");
+  const { viewMode: dashboardMode } = useViewMode();
 
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: "instant" });
   }, []);
-
-  useEffect(() => {
-    setDashboardMode(user?.dashboard_mode || "merged");
-  }, [user?.dashboard_mode]);
-
-  useEffect(() => {
-    const handler = (e) => setDashboardMode(resolveDashboardMode(user, e));
-    window.addEventListener("dashboardModeChanged", handler);
-    return () => window.removeEventListener("dashboardModeChanged", handler);
-  }, [user]);
 
   const [health, setHealth] = useState(null);
   const [healthLoading, setHealthLoading] = useState(true);
@@ -87,8 +70,9 @@ export default function InsightsTab({ userId, month, year, setActiveTab }) {
 
   const savingsRate =
     health?.savings_rate ?? health?.components?.savings_rate_pct ?? null;
-  const scoreReady = !healthLoading && !healthError && health != null;
-  const scoreDisplay = scoreReady && health.score != null ? `${health.score}/100` : "—";
+  const insufficientData = health?.reason === "not_enough_data" || health?.score == null;
+  const scoreReady = !healthLoading && !healthError && health != null && !insufficientData;
+  const scoreDisplay = scoreReady ? `${health.score}/100` : insufficientData ? "—" : "—";
 
   const handleChatNavigate = useCallback(
     (route) => {
@@ -154,9 +138,11 @@ export default function InsightsTab({ userId, month, year, setActiveTab }) {
             caption={
               healthLoading
                 ? undefined
-                : savingsRate != null
-                  ? `${Number(savingsRate).toFixed(1)}% savings rate this month`
-                  : undefined
+                : insufficientData
+                  ? health?.message || "Upload more statements to unlock your Health Score"
+                  : savingsRate != null
+                    ? `${Number(savingsRate).toFixed(1)}% savings rate this month`
+                    : undefined
             }
             captionLoading={healthLoading}
             delta={

@@ -19,6 +19,7 @@ import {
   Workflow,
   Zap,
 } from "lucide-react";
+import { useViewMode } from "../../context/ViewModeContext";
 import { getFraudShieldAnalyze, getFraudShieldStats } from "../../services/api";
 import { ErrorCard } from "../common/ErrorCard";
 import { SkeletonCard } from "../common/SkeletonCard";
@@ -31,6 +32,7 @@ import TransactionChecker from "./TransactionChecker";
 import FraudShieldLiveEventsTab from "./FraudShieldLiveEventsTab";
 import RealTimeFraudFeed from "./RealTimeFraudFeed";
 import InvestigationConsole from "./InvestigationConsole";
+import InvestigationList from "./InvestigationList";
 import { PhaseCard } from "./PhaseCard";
 import { PhaseFlowBackdrop } from "./PhaseFlowBackdrop";
 import { TrustRing } from "./TrustRing";
@@ -229,6 +231,7 @@ function StatStrip({ safetyScore, blocked, saved, loading, error, onRetry }) {
 }
 
 const FraudShieldPage = ({ userId, userName }) => {
+  const { viewMode } = useViewMode();
   const readInitialTab = () => {
     try {
       const q = new URLSearchParams(window.location.search).get("fraudTab");
@@ -266,30 +269,24 @@ const FraudShieldPage = ({ userId, userName }) => {
     setStats(null);
     setAnalyze(null);
     try {
-      const s = await getFraudShieldStats(userId);
+      const s = await getFraudShieldStats(userId, viewMode);
       setStats(s);
     } catch (e) {
       setError(e.message || "Failed to load stats");
     }
     try {
-      const a = await getFraudShieldAnalyze(userId);
+      const a = await getFraudShieldAnalyze(userId, viewMode);
       setAnalyze(a);
     } catch {
       setAnalyze(null);
     } finally {
       setLoading(false);
     }
-  }, [userId]);
+  }, [userId, viewMode]);
 
   useEffect(() => {
     load();
   }, [load, alertsTick]);
-
-  useEffect(() => {
-    const handler = () => load();
-    window.addEventListener("dashboardModeChanged", handler);
-    return () => window.removeEventListener("dashboardModeChanged", handler);
-  }, [load]);
 
   /** Sync tab when URL `fraudTab` changes without remount (e.g. mastery rail). */
   useEffect(() => {
@@ -427,7 +424,7 @@ const FraudShieldPage = ({ userId, userName }) => {
               <h2 className="text-lg font-bold text-white">Behaviour profile</h2>
               <p className="text-sm text-gray-400">Login cadence, geo signals, and anomaly list — ported from the old Behaviour Profile page.</p>
               <Suspense fallback={tabFallback}>
-                <BehaviorProfile userId={userId} onNavigate={onLegacyNav} embedded />
+                <BehaviorProfile key={`${userId}-${viewMode}`} userId={userId} onNavigate={onLegacyNav} embedded />
               </Suspense>
             </div>
           )}
@@ -450,6 +447,7 @@ const FraudShieldPage = ({ userId, userName }) => {
                   below to watch a live-style trace, then review real queue items.
                 </p>
               </div>
+              <InvestigationList userId={userId} />
               <InvestigationConsole userId={userId} />
               <Suspense fallback={tabFallback}>
                 <InvestigationViewer userId={userId} />

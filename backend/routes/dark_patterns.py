@@ -5,12 +5,12 @@ from __future__ import annotations
 import json
 from collections import defaultdict
 from datetime import date, datetime, timedelta
-from typing import Any
+from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from db import get_db
-from services.dashboard_scope import fetch_dashboard_mode, transaction_scope_sql
+from services.dashboard_scope import resolve_scope_mode, transaction_scope_sql
 from services.openai_service import call_gpt
 
 router = APIRouter(prefix="/dark-patterns", tags=["Dark Patterns"])
@@ -32,11 +32,13 @@ def _to_dt(d: date, t: Any) -> datetime:
     return datetime.combine(d, t)
 
 
-def _fetch_transactions(conn, user_id: int, months: int = 18) -> list[dict[str, Any]]:
+def _fetch_transactions(
+    conn, user_id: int, months: int = 18, scope: str | None = None
+) -> list[dict[str, Any]]:
     cur = conn.cursor()
     try:
-        mode = fetch_dashboard_mode(cur, user_id)
-        scope = transaction_scope_sql("t", mode)
+        mode = resolve_scope_mode(cur, user_id, scope)
+        scope_sql = transaction_scope_sql("t", mode)
         cur.execute(
             f"""
             SELECT t.id, t.transaction_date, t.transaction_time, t.amount::float, COALESCE(t.type, ''),
@@ -44,7 +46,7 @@ def _fetch_transactions(conn, user_id: int, months: int = 18) -> list[dict[str, 
             FROM transactions t
             WHERE t.user_id = %s
               AND t.transaction_date >= (CURRENT_DATE - (%s || ' months')::interval)
-              AND ({scope})
+              AND ({scope_sql})
             ORDER BY t.transaction_date, t.transaction_time;
             """,
             (user_id, months),
@@ -465,8 +467,8 @@ Write 2 concise English warning sentences with actionable advice.
     }
 
 
-def _detect_patterns(conn, user_id: int) -> dict[str, Any]:
-    txns = _fetch_transactions(conn, user_id)
+def _detect_patterns(conn, user_id: int, scope: str | None = None) -> dict[str, Any]:
+    txns = _fetch_transactions(conn, user_id, scope=scope)
     grouped = _group_by_merchant(txns)
 
     patterns = (
@@ -533,17 +535,31 @@ Write concise advice in English only.
 
 
 @router.get("/{user_id}")
-def get_dark_patterns(user_id: int, conn=Depends(get_db)):
+def get_dark_patterns(
+    user_id: int,
+    scope: Optional[str] = Query(
+        None,
+        description="bank_only | credit_card_only | merged",
+    ),
+    conn=Depends(get_db),
+):
     try:
-        return _detect_patterns(conn, user_id)
+        return _detect_patterns(conn, user_id, scope)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Dark pattern detection failed: {exc}") from exc
 
 
 @router.get("/{user_id}/rupee-traps")
-def get_rupee_trap_report(user_id: int, conn=Depends(get_db)):
+def get_rupee_trap_report(
+    user_id: int,
+    scope: Optional[str] = Query(
+        None,
+        description="bank_only | credit_card_only | merged",
+    ),
+    conn=Depends(get_db),
+):
     try:
-        txns = _fetch_transactions(conn, user_id)
+        txns = _fetch_transactions(conn, user_id, scope=scope)
         return detect_rupee_traps(txns)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Rupee trap detection failed: {exc}") from exc

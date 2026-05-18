@@ -50,11 +50,45 @@ const urgencyDot = (u) => {
 
 function dispatchPlannerSync(userId) {
   try {
+    window.dispatchEvent(new CustomEvent("smartspend:festival-plans-changed", { detail: { userId } }));
     window.dispatchEvent(new CustomEvent("smartspend:purchase-goals-changed", { detail: { userId } }));
     window.dispatchEvent(new CustomEvent("smartspend-financial-sync", { detail: { userId } }));
   } catch {
     /* ignore */
   }
+}
+
+function mergeFestCardIntoData(prev, card) {
+  if (!card?.festival_name || !prev) return prev;
+  const key = festCardKey(card);
+  const list = [...(prev.upcoming_festivals || [])];
+  const idx = list.findIndex((f) => festCardKey(f) === key);
+  if (idx >= 0) list[idx] = { ...list[idx], ...card };
+  else list.push(card);
+  list.sort(
+    (a, b) =>
+      new Date(`${a.festival_date}T12:00:00`).getTime() -
+      new Date(`${b.festival_date}T12:00:00`).getTime(),
+  );
+  const monthlySum = list.reduce((s, g) => s + Number(g.monthly_saving_needed || 0), 0);
+  const budgetSum = list.reduce((s, g) => s + Number(g.recommended_budget || 0), 0);
+  const avgSaved = Number(prev.current_savings_rate_monthly || 0);
+  const gap = Math.max(0, monthlySum - avgSaved);
+  return {
+    ...prev,
+    upcoming_festivals: list,
+    total_festival_budget_needed: budgetSum,
+    monthly_total_target: monthlySum,
+    gap_vs_current_savings_monthly: gap,
+    on_track: gap <= Math.max(500, monthlySum * 0.15),
+    next_festival: list.length
+      ? {
+          name: list[0].festival_name,
+          days_remaining: list[0].days_remaining,
+          urgency: list[0].urgency,
+        }
+      : prev.next_festival,
+  };
 }
 
 function festCardKey(f) {
@@ -137,9 +171,11 @@ const FestivalPredictor = ({ userId }) => {
     };
     window.addEventListener("smartspend-financial-sync", onSync);
     window.addEventListener("smartspend:purchase-goals-changed", onSync);
+    window.addEventListener("smartspend:festival-plans-changed", onSync);
     return () => {
       window.removeEventListener("smartspend-financial-sync", onSync);
       window.removeEventListener("smartspend:purchase-goals-changed", onSync);
+      window.removeEventListener("smartspend:festival-plans-changed", onSync);
     };
   }, [userId, load]);
 
@@ -295,7 +331,8 @@ const FestivalPredictor = ({ userId }) => {
   const toggleDayReminder = async (d) => {
     setTogglingReminderId(d.id);
     try {
-      const enabling = !d.reminder_enabled;
+      const currentlyOn = d.reminder_enabled !== false;
+      const enabling = !currentlyOn;
       await putFestivalImportantDayReminder(userId, d.id, { reminder_enabled: enabling });
       await load();
       dispatchPlannerSync(userId);
@@ -390,13 +427,27 @@ const FestivalPredictor = ({ userId }) => {
         planned_budget: planned,
         category_budgets: {},
       });
+      const newCard = res?.event;
+      const addedName = eventModal.festival_name.trim();
       setEventModal(null);
+      if (newCard?.festival_name) {
+        setData((prev) => mergeFestCardIntoData(prev, newCard));
+      }
       await load();
+      if (newCard?.festival_name) {
+        const key = festCardKey(newCard);
+        setExpanded((e) => ({ ...e, [key]: true }));
+        setHighlightFest(key);
+        setTimeout(() => {
+          document.getElementById(`fest-card-${key}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+        }, 120);
+        setTimeout(() => setHighlightFest(null), 2500);
+      }
       dispatchPlannerSync(userId);
       showToast(
         res?.fallback === "purchase_goal"
-          ? "Saved as purchase goal (EMI tracker) — restart backend on port 8002 for full festival cards."
-          : "Event plan added — synced with EMI tracker ✅",
+          ? `“${addedName}” added — linked to Purchase Planner and EMI tracker.`
+          : `“${addedName}” added — scroll down to see your plan.`,
       );
     } catch (e) {
       showToast(e.message || "Could not add event", "error");
@@ -906,7 +957,8 @@ const FestivalPredictor = ({ userId }) => {
           <div className="modal-card glass-card fest-budget-modal" onClick={(e) => e.stopPropagation()}>
             <h3 id="fest-event-title">Add event plan</h3>
             <p className="fest-budget-hint">
-              Weddings, trips, school fees — any dated spend goal. Syncs with EMI Tracker headroom automatically.
+              Weddings, trips, school fees — any dated spend goal (up to ~5 years). Appears in the cards below
+              and syncs with EMI Tracker headroom.
             </p>
             <label className="fraud-field" style={{ marginTop: 12 }}>
               Event name

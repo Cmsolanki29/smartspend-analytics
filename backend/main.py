@@ -70,7 +70,10 @@ from routes import (
     festival_planner_ext,
     festival_predictor,
     financial_state,
+    financial_summary,
     fraud_shield,
+    realtime_ws,
+    user_scoped_api,
     health_score,
     insights,
     onboarding,
@@ -115,9 +118,8 @@ _risk_scheduler = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Do not block HTTP readiness on ML training. train_all_users() can take minutes
-    with large seeded DBs; the frontend axios timeout (15s) would fail signup/signin
-    if we ran it synchronously before the first yield.
+    Yield immediately so /health and /api/auth respond within seconds.
+    Heavy imports (LLM router, ML warmup, risk engine) run in a background task.
     """
 
     async def _warm_ml_models() -> None:
@@ -127,53 +129,9 @@ async def lifespan(app: FastAPI):
         except Exception as exc:  # noqa: BLE001
             print(f"Startup ML/DB step warning: {exc}")
 
-    print("SmartSpend Backend Ready (ML training running in background).")
-
-    import sys
-
-    try:
-        import pdfplumber as _pp
-
-        print(
-            f"[documents] pdfplumber OK (v{getattr(_pp, '__version__', '?')}) — PDF statement extraction enabled."
-        )
-    except Exception as _pdf_exc:  # noqa: BLE001
-        print(
-            f"[documents] WARNING: pdfplumber not usable ({type(_pdf_exc).__name__}: {_pdf_exc}). "
-            f"Install into the SAME Python that runs uvicorn:\n"
-            f"  {sys.executable} -m pip install pdfplumber"
-        )
-
-    try:
-        from services.monster_extraction import _configure_tesseract
-
-        if _configure_tesseract():
-            import pytesseract as _pt
-
-            print(f"[documents] Tesseract OCR OK — {_pt.pytesseract.tesseract_cmd}")
-        else:
-            print(
-                "[documents] WARNING: Tesseract not found. Scanned PDFs/images need OCR. "
-                "Set TESSERACT_CMD in .env to your tesseract.exe path."
-            )
-    except Exception as _ocr_exc:  # noqa: BLE001
-        print(f"[documents] WARNING: OCR setup failed ({type(_ocr_exc).__name__}: {_ocr_exc})")
-
-    try:
-        from services.llm_router import get_llm_router
-
-        _llm = get_llm_router(required=False)
-        if _llm:
-            print(f"[documents] LLM Router OK — providers: {list(_llm.providers.keys())}")
-        else:
-            print("[documents] WARNING: LLM Router unavailable (no API keys for extraction LLM)")
-    except Exception as _llm_exc:  # noqa: BLE001
-        print(f"[documents] WARNING: LLM Router init failed ({type(_llm_exc).__name__}: {_llm_exc})")
-
-    asyncio.create_task(_warm_ml_models())
-
-    # ── Phase 1-8 startup ──────────────────────────────────────────────────
-    if _RISK_ENGINE_OK:
+    async def _boot_risk_engine_async() -> None:
+        if not _RISK_ENGINE_OK:
+            return
         try:
             await init_pool()
             await init_redis()
@@ -247,45 +205,98 @@ async def lifespan(app: FastAPI):
         except Exception as _we:
             print(f"[RiskEngine] Worker startup skipped: {_we}")
 
-    if os.getenv("PATTERN_ALERT_CRON", "0") == "1":
-        async def _pattern_alert_loop() -> None:
-            from db import get_connection
-            from services.pattern_predictor import (
-                expire_stale_alerts,
-                predict_upcoming_charges,
-                upsert_pattern_alerts,
+    async def _deferred_startup() -> None:
+        print("SmartSpend Backend Ready (warming services in background).")
+        import sys
+
+        try:
+            import pdfplumber as _pp
+
+            print(
+                f"[documents] pdfplumber OK (v{getattr(_pp, '__version__', '?')}) — PDF statement extraction enabled."
+            )
+        except Exception as _pdf_exc:  # noqa: BLE001
+            print(
+                f"[documents] WARNING: pdfplumber not usable ({type(_pdf_exc).__name__}: {_pdf_exc}). "
+                f"Install into the SAME Python that runs uvicorn:\n"
+                f"  {sys.executable} -m pip install pdfplumber"
             )
 
-            await asyncio.sleep(120)
-            while True:
-                try:
+        try:
+            from services.monster_extraction import _configure_tesseract
 
-                    def _scan_once() -> None:
-                        cnx = get_connection()
-                        try:
-                            expire_stale_alerts(cnx)
-                            cur = cnx.cursor()
-                            cur.execute("SELECT id FROM users")
-                            uids = [r[0] for r in cur.fetchall()]
-                            cur.close()
-                            for uid in uids:
-                                pr = predict_upcoming_charges(cnx, uid)
-                                upsert_pattern_alerts(cnx, pr)
-                            cnx.commit()
-                        except Exception as exc:
-                            cnx.rollback()
-                            print(f"[pattern-alerts] scan error: {exc}")
-                        finally:
-                            cnx.close()
+            if _configure_tesseract():
+                import pytesseract as _pt
 
-                    await asyncio.to_thread(_scan_once)
-                except Exception as exc:
-                    print(f"[pattern-alerts] loop: {exc}")
-                await asyncio.sleep(6 * 3600)
+                print(f"[documents] Tesseract OCR OK — {_pt.pytesseract.tesseract_cmd}")
+            else:
+                print(
+                    "[documents] WARNING: Tesseract not found. Scanned PDFs/images need OCR. "
+                    "Set TESSERACT_CMD in .env to your tesseract.exe path."
+                )
+        except Exception as _ocr_exc:  # noqa: BLE001
+            print(f"[documents] WARNING: OCR setup failed ({type(_ocr_exc).__name__}: {_ocr_exc})")
 
-        asyncio.create_task(_pattern_alert_loop())
-        print("Pattern alert cron enabled (PATTERN_ALERT_CRON=1, every 6h).")
+        try:
+            from services.llm_router import get_llm_router
 
+            _llm = get_llm_router(required=False)
+            if _llm:
+                print(f"[documents] LLM Router OK — providers: {list(_llm.providers.keys())}")
+            else:
+                print("[documents] WARNING: LLM Router unavailable (no API keys for extraction LLM)")
+        except Exception as _llm_exc:  # noqa: BLE001
+            print(f"[documents] WARNING: LLM Router init failed ({type(_llm_exc).__name__}: {_llm_exc})")
+
+        if os.getenv("SMARTSPEND_SKIP_ML_WARMUP", "").lower() not in ("1", "true", "yes"):
+            asyncio.create_task(_warm_ml_models())
+        else:
+            print("SmartSpend ML warmup skipped (SMARTSPEND_SKIP_ML_WARMUP).")
+
+        if _RISK_ENGINE_OK:
+            await _boot_risk_engine_async()
+
+        if os.getenv("PATTERN_ALERT_CRON", "0") == "1":
+            async def _pattern_alert_loop() -> None:
+                from db import get_connection
+                from services.pattern_predictor import (
+                    expire_stale_alerts,
+                    predict_upcoming_charges,
+                    upsert_pattern_alerts,
+                )
+
+                await asyncio.sleep(120)
+                while True:
+                    try:
+
+                        def _scan_once() -> None:
+                            cnx = get_connection()
+                            try:
+                                expire_stale_alerts(cnx)
+                                cur = cnx.cursor()
+                                cur.execute("SELECT id FROM users")
+                                uids = [r[0] for r in cur.fetchall()]
+                                cur.close()
+                                for uid in uids:
+                                    pr = predict_upcoming_charges(cnx, uid)
+                                    upsert_pattern_alerts(cnx, pr)
+                                cnx.commit()
+                            except Exception as exc:
+                                cnx.rollback()
+                                print(f"[pattern-alerts] scan error: {exc}")
+                            finally:
+                                cnx.close()
+
+                        await asyncio.to_thread(_scan_once)
+                    except Exception as exc:
+                        print(f"[pattern-alerts] loop: {exc}")
+                    await asyncio.sleep(6 * 3600)
+
+            asyncio.create_task(_pattern_alert_loop())
+            print("Pattern alert cron enabled (PATTERN_ALERT_CRON=1, every 6h).")
+
+    # API routes live before ML warmup / risk engine finish (critical for deploy health checks).
+    asyncio.create_task(_deferred_startup())
     yield
 
     # ── Phase 1-8 shutdown ─────────────────────────────────────────────────
@@ -352,12 +363,15 @@ app.include_router(subscription_graveyard.router, prefix="/api")
 app.include_router(subscription_intelligence.router, prefix="/api")
 app.include_router(dark_patterns.router, prefix="/api")
 app.include_router(fraud_shield.router, prefix="/api")
+app.include_router(user_scoped_api.router, prefix="/api")
+app.include_router(realtime_ws.router)
 app.include_router(simulator.router, prefix="/api")
 app.include_router(festival_important_days.router, prefix="/api")
 app.include_router(festival_predictor.router, prefix="/api")
 app.include_router(festival_planner_ext.router, prefix="/api")
 app.include_router(purchase_planner.router, prefix="/api")
 app.include_router(financial_state.router, prefix="/api")
+app.include_router(financial_summary.router, prefix="/api")
 app.include_router(pattern_alerts.router, prefix="/api")
 app.include_router(documents.router, prefix="/api")
 app.include_router(trip_planner.router, prefix="/api")
@@ -511,6 +525,8 @@ def root() -> dict[str, Any]:
             "POST /api/purchases/{user_id}/{goal_id}/postpone",
             "POST /api/purchases/{user_id}/goals/{goal_id}/postpone",
             "PUT /api/purchases/{user_id}/{goal_id}/update-savings",
+            "POST /api/purchases/{user_id}/{goal_id}/complete",
+            "POST /api/purchases/{user_id}/goals/{goal_id}/complete",
             "DELETE /api/purchases/{user_id}/{goal_id}",
             "GET /api/dashboard/{user_id}",
             "GET /api/ml/status",
@@ -560,6 +576,11 @@ def health() -> dict[str, Any]:
         "redis": redis_status,
         "ml": "ready",
         "version": "2.0.0",
+        "api_capabilities": {
+            "purchase_goal_complete": True,
+            "festival_custom_event": True,
+            "festival_planner_v2": True,
+        },
         "python_executable": sys.executable,
         "pdfplumber": pdf,
         "fraud_shield_note": (

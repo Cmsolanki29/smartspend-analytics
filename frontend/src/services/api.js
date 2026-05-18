@@ -1,10 +1,12 @@
 import axios from "axios";
-import { getApiBaseUrl } from "./apiBaseUrl";
+import { getApiBaseUrl, getBackendRootUrl, getDevBackendHint, getDevHealthUrl } from "./apiBaseUrl";
 
 /** Long-running AI insight bundle (parallel Groq/OpenAI calls). */
 export const INSIGHTS_FETCH_MS = 42000;
+/** Dashboard charts + scoped SQL — must exceed cold-start / merged-scope queries. */
+export const DASHBOARD_FETCH_MS = 45000;
 
-/** Dev: `/api` → CRA proxy → backend (see `frontend/package.json` `"proxy"`, default port 8001). Prod: `REACT_APP_API_URL` or localhost default. */
+/** Dev: `/api` → setupProxy.js → backend port 8002. Prod: `REACT_APP_API_URL` or 8002 default. */
 const BASE_URL = getApiBaseUrl();
 
 export const TOKEN_ACCESS_KEY = "smartspend_access_token";
@@ -38,7 +40,7 @@ export function clearAuthTokens() {
 
 const api = axios.create({
   baseURL: BASE_URL,
-  timeout: 15000,  // 15s — generous but won't block UI for 30s
+  timeout: 20000,
   headers: {
     "Content-Type": "application/json",
   },
@@ -122,16 +124,16 @@ const authDetail = (error) => {
     if (code === "ECONNABORTED" || /timeout/i.test(msg)) {
       return (
         `Request timed out before the API responded (${BASE_URL}). ` +
-        `If the backend just started, wait ~30s (first DB + ML warmup) and refresh. ` +
-        `Otherwise start it: .\\start-backend.ps1 (default port 8001) and open http://127.0.0.1:8001/health`
+        `If the backend just started, wait ~30s (DB + ML warmup) and try again. ` +
+        `${getDevBackendHint()}. Check ${getDevHealthUrl()} in your browser.`
       );
     }
     if (msg === "Network Error" || code === "ERR_NETWORK") {
       return (
         `Cannot reach the API (${BASE_URL}). ` +
-        `Start the backend: .\\start-backend.ps1 (default port 8001). ` +
-        `Open http://127.0.0.1:8001/health or /docs. ` +
-        `In development the app calls /api through the CRA proxy — ensure the API is listening on the same port as package.json "proxy".`
+        `${getDevBackendHint()}. ` +
+        `Open ${getDevHealthUrl()} or ${getDevHealthUrl(8001)} — one should return {"status":"healthy"}. ` +
+        `Restart the frontend after starting the backend so the dev proxy picks the correct port.`
       );
     }
   }
@@ -139,6 +141,29 @@ const authDetail = (error) => {
 };
 
 const AUTH_TIMEOUT_MS = 60000;
+
+/** Dev: GET /health via proxy, then direct :8002 / :8001. Prod: GET {API_ROOT}/health */
+export async function pingBackendHealth(timeoutMs = 5000) {
+  const urls = [];
+  const root = getBackendRootUrl();
+  if (root) {
+    urls.push(`${root.replace(/\/$/, "")}/health`);
+  } else {
+    urls.push("/health", "http://127.0.0.1:8002/health", "http://127.0.0.1:8001/health");
+  }
+  const perTry = Math.max(1500, Math.min(3000, Math.floor(timeoutMs / urls.length)));
+  for (const url of urls) {
+    try {
+      const { status, data } = await axios.get(url, { timeout: perTry });
+      if (status === 200 && data && (data.status === "healthy" || data.status === "ok")) {
+        return true;
+      }
+    } catch {
+      /* try next endpoint */
+    }
+  }
+  return false;
+}
 
 export async function authSignin(body) {
   try {
@@ -160,7 +185,7 @@ export async function authSignup(body) {
 
 export async function authGetMe() {
   try {
-    const { data } = await api.get("/auth/me", { timeout: 20000 });
+    const { data } = await api.get("/auth/me", { timeout: 10000 });
     return data;
   } catch (e) {
     throw new Error(authDetail(e));
@@ -182,6 +207,13 @@ function apiSourceId(sourceId) {
     throw new Error("Invalid account id. Reload Connected accounts and try again.");
   }
   return n;
+}
+
+/** Attach dashboard scope to query params when provided. */
+function withScope(params, scope) {
+  const p = { ...(params || {}) };
+  if (scope) p.scope = scope;
+  return p;
 }
 
 /** Connected financial sources + dashboard scope */
@@ -337,6 +369,44 @@ const request = async (promise) => {
   }
 };
 
+/** Retry transient failures (cold start, reload) — safe for any user_id. */
+export async function requestWithRetry(makePromise, { retries = 3, delayMs = 1200 } = {}) {
+  let lastErr;
+  for (let attempt = 0; attempt < retries; attempt += 1) {
+    try {
+      return await request(makePromise(attempt));
+    } catch (e) {
+      lastErr = e;
+      const msg = String(e?.message || "").toLowerCase();
+      const retryable =
+        msg.includes("timeout") ||
+        msg.includes("network error") ||
+        msg.includes("not found") ||
+        msg.includes("502") ||
+        msg.includes("503") ||
+        msg.includes("504") ||
+        msg.includes("starting up");
+      if (!retryable || attempt >= retries - 1) throw e;
+      await new Promise((r) => setTimeout(r, delayMs * (attempt + 1)));
+    }
+  }
+  throw lastErr;
+}
+
+export async function waitForBackendReady(maxWaitMs = 45000) {
+  const started = Date.now();
+  while (Date.now() - started < maxWaitMs) {
+    try {
+      const ok = await pingBackendHealth(4000);
+      if (ok) return true;
+    } catch {
+      /* retry */
+    }
+    await new Promise((r) => setTimeout(r, 1500));
+  }
+  return false;
+}
+
 export const getUsers = async () => request(api.get("/users"));
 export const getUser = async (userId) => request(api.get(`/users/${userId}`));
 
@@ -349,36 +419,73 @@ export const getUser = async (userId) => request(api.get(`/users/${userId}`));
 export const getDashboardSummary = async (userId) =>
   request(api.get(`/dashboard/${userId}`));
 
-export const getTransactions = async (userId, params = {}) =>
-  request(api.get(`/transactions/${userId}`, { params }));
+export const getTransactions = async (userId, params = {}, scope = null) =>
+  request(api.get(`/transactions/${userId}`, { params: withScope(params, scope) }));
 
-export const getTransactionSummary = async (userId, monthOrOpts, yearMaybe) => {
+export const getTransactionSummary = async (userId, monthOrOpts, yearMaybe, scopeMaybe) => {
   const params = {};
+  let scope = scopeMaybe;
   if (monthOrOpts != null && typeof monthOrOpts === "object" && !Array.isArray(monthOrOpts)) {
     const o = monthOrOpts;
     if (o.month != null) params.month = o.month;
     if (o.year != null) params.year = o.year;
+    if (o.scope) scope = o.scope;
   } else {
     if (monthOrOpts != null) params.month = monthOrOpts;
     if (yearMaybe != null) params.year = yearMaybe;
   }
-  return request(api.get(`/transactions/${userId}/summary`, { params }));
+  return request(api.get(`/transactions/${userId}/summary`, { params: withScope(params, scope) }));
 };
 
-export const getSpendingAnalysis = async (userId, month, year) =>
-  request(api.get(`/analysis/${userId}/spending`, { params: { month, year } }));
+export const getSpendingAnalysis = async (userId, month, year, scope = null) =>
+  requestWithRetry(
+    () =>
+      api.get(`/analysis/${userId}/spending`, {
+        params: withScope({ month, year }, scope),
+        timeout: DASHBOARD_FETCH_MS,
+      }),
+    { retries: 2, delayMs: 1000 }
+  );
 
-export const getMonthlyTrends = async (userId) =>
-  request(api.get(`/analysis/${userId}/trends`));
+export const getMonthlyTrends = async (userId, scope = null) =>
+  requestWithRetry(
+    () =>
+      api.get(`/analysis/${userId}/trends`, {
+        params: withScope({}, scope),
+        timeout: DASHBOARD_FETCH_MS,
+      }),
+    { retries: 2, delayMs: 1000 }
+  );
 
-export const getTopMerchants = async (userId, month, year) =>
-  request(api.get(`/analysis/${userId}/merchants`, { params: { month, year } }));
+export const getTopMerchants = async (userId, month, year, scope = null) =>
+  requestWithRetry(
+    () =>
+      api.get(`/analysis/${userId}/merchants`, {
+        params: withScope({ month, year }, scope),
+        timeout: DASHBOARD_FETCH_MS,
+      }),
+    { retries: 2, delayMs: 1000 }
+  );
 
-export const getAnomalies = async (userId, severity = null) =>
-  request(api.get(`/anomalies/${userId}`, { params: severity ? { severity } : {} }));
+export const getAnomalies = async (userId, severity = null, scope = null) =>
+  requestWithRetry(
+    () =>
+      api.get(`/anomalies/${userId}`, {
+        params: withScope(severity ? { severity } : {}, scope),
+        timeout: DASHBOARD_FETCH_MS,
+      }),
+    { retries: 2, delayMs: 1000 }
+  );
 
-export const getAnomalyStats = async (userId) =>
-  request(api.get(`/anomalies/${userId}/stats`, { timeout: 30000 }));
+export const getAnomalyStats = async (userId, scope = null) =>
+  requestWithRetry(
+    () =>
+      api.get(`/anomalies/${userId}/stats`, {
+        params: withScope({}, scope),
+        timeout: DASHBOARD_FETCH_MS,
+      }),
+    { retries: 2, delayMs: 1000 }
+  );
 
 export const runMLDetection = async (userId) =>
   request(api.post(`/anomalies/${userId}/run-detection`));
@@ -386,7 +493,10 @@ export const runMLDetection = async (userId) =>
 export const getHealthScore = async (userId, month, year, scope = null) => {
   const params = { month, year };
   if (scope) params.scope = scope;
-  return request(api.get(`/health-score/${userId}`, { params, timeout: 25000 }));
+  return requestWithRetry(
+    () => api.get(`/health-score/${userId}`, { params, timeout: DASHBOARD_FETCH_MS }),
+    { retries: 2, delayMs: 1000 }
+  );
 };
 
 export const getHealthHistory = async (userId) =>
@@ -493,8 +603,18 @@ export const getQuickSummary = async (userId, opts = {}) => {
   const params = {};
   if (opts.month != null) params.month = opts.month;
   if (opts.year != null) params.year = opts.year;
-  return request(api.get(`/insights/${userId}/quick-summary`, { params }));
+  return requestWithRetry(
+    () =>
+      api.get(`/insights/${userId}/quick-summary`, {
+        params: withScope(params, opts.scope),
+        timeout: DASHBOARD_FETCH_MS,
+      }),
+    { retries: 2, delayMs: 1000 }
+  );
 };
+
+export const getFinancialSummary = async (userId, scope = null) =>
+  request(api.get(`/financial-summary/${apiUserId(userId)}`, { params: withScope({}, scope) }));
 
 export const getAnomalyExplanation = async (userId, transactionId) =>
   request(api.get(`/insights/${userId}/anomaly/${transactionId}`));
@@ -505,7 +625,17 @@ export const simulateScenario = async (userId, scenario, month, year) =>
 export const getHealthNarrative = async (userId, month, year) =>
   request(api.get(`/insights/${userId}/health-narrative`, { params: { month, year } }));
 
-export const getEmiReport = async (userId) => request(api.get(`/emi/${userId}`));
+export const getEmiReport = async (userId, scope = null) => {
+  const uid = apiUserId(userId);
+  return requestWithRetry(
+    () =>
+      api.get(`/emi/${uid}`, {
+        params: withScope({}, scope),
+        timeout: 45000,
+      }),
+    { retries: 3, delayMs: 1500 },
+  );
+};
 
 export const scanEmi = async (userId) => request(api.post(`/emi/${userId}/scan`));
 
@@ -618,11 +748,11 @@ export const postSubscriptionSimulateNextDay = async (userId) =>
 export const postSubscriptionResetDemo = async (userId) =>
   request(api.post(`/subscription-intelligence/${userId}/reset-demo`, {}));
 
-export const getDarkPatterns = async (userId) =>
-  request(api.get(`/dark-patterns/${userId}`));
+export const getDarkPatterns = async (userId, scope = null) =>
+  request(api.get(`/dark-patterns/${userId}`, { params: withScope({}, scope) }));
 
-export const getRupeeTraps = async (userId) =>
-  request(api.get(`/dark-patterns/${userId}/rupee-traps`));
+export const getRupeeTraps = async (userId, scope = null) =>
+  request(api.get(`/dark-patterns/${userId}/rupee-traps`, { params: withScope({}, scope) }));
 
 export const scanDarkPatterns = async (userId) =>
   request(api.post(`/dark-patterns/${userId}/scan`));
@@ -661,8 +791,8 @@ export const getFraudShieldGlobalSummary = async () => request(api.get("/fraud-s
 
 export const getFraudShieldPatterns = async () => request(api.get("/fraud-shield/patterns"));
 
-export const getFraudShieldAnalyze = async (userId) =>
-  request(api.get(`/fraud-shield/${userId}/analyze`));
+export const getFraudShieldAnalyze = async (userId, scope = null) =>
+  request(api.get(`/fraud-shield/${userId}/analyze`, { params: withScope({}, scope) }));
 
 export const postFraudShieldCheckTransaction = async (userId, payload) =>
   request(api.post(`/fraud-shield/${userId}/check-transaction`, payload));
@@ -670,8 +800,21 @@ export const postFraudShieldCheckTransaction = async (userId, payload) =>
 export const getFraudShieldPhasesStatus = async (userId) =>
   request(api.get(`/fraud-shield/${userId}/phases-status`));
 
-export const getFraudShieldAlerts = async (userId) =>
-  request(api.get(`/fraud-shield/${userId}/alerts`));
+export const getFraudShieldAlerts = async (userId, scope = null) =>
+  request(api.get(`/fraud-shield/${userId}/alerts`, { params: withScope({}, scope) }));
+
+/** Scoped fraud alerts (alias — same data, JWT-protected). */
+export const getUserFraudAlerts = async (userId, scope = null) =>
+  request(api.get(`/${apiUserId(userId)}/fraud-alerts`, { params: withScope({}, scope) }));
+
+export const getUserBehaviour = async (userId, scope = null) =>
+  request(api.get(`/${apiUserId(userId)}/behaviour`, { params: withScope({}, scope) }));
+
+export const getUserInvestigations = async (userId, scope = null) =>
+  request(api.get(`/${apiUserId(userId)}/investigation`, { params: withScope({}, scope) }));
+
+export const getLinkedAccounts = async (userId) =>
+  request(api.get(`/${apiUserId(userId)}/linked-accounts`));
 
 export const postFraudShieldAlertAction = async (userId, alertId, action) =>
   request(api.post(`/fraud-shield/${userId}/alerts/${alertId}/action`, { action }));
@@ -680,8 +823,8 @@ export const postFraudShieldAlertAction = async (userId, alertId, action) =>
 export const postFraudShieldAlertActionByTransaction = async (userId, transactionId, action) =>
   request(api.post(`/fraud-shield/${userId}/alerts/by-transaction/${transactionId}/action`, { action }));
 
-export const getFraudShieldStats = async (userId) =>
-  request(api.get(`/fraud-shield/${userId}/stats`));
+export const getFraudShieldStats = async (userId, scope = null) =>
+  request(api.get(`/fraud-shield/${userId}/stats`, { params: withScope({}, scope) }));
 
 export const getFestivals = async (userId) => request(api.get(`/festivals/${userId}`));
 
@@ -703,38 +846,59 @@ export const putFestivalUpdateSavings = async (userId, payload) => {
   }
 };
 
+const isHttpNotFound = (e) => {
+  const m = String(e.message || "").toLowerCase();
+  return m.includes("not found") || m.includes("status code 404");
+};
+
+const STALE_BACKEND_HINT =
+  "Backend API is outdated or on the wrong port. Stop all Python/uvicorn windows, then run .\\start-dev.ps1 (uses port 8002). Restart the frontend after it compiles.";
+
 export const postFestivalAddEvent = async (userId, payload) => {
   const uid = apiUserId(userId);
-  const is404 = (e) => String(e.message || "").toLowerCase().includes("not found");
-  try {
-    return await request(api.post(`/festivals/${uid}/planner/event`, payload));
-  } catch (e1) {
-    if (!is404(e1)) throw e1;
+  const is404 = isHttpNotFound;
+  const body = {
+    festival_name: payload.festival_name,
+    festival_date: payload.festival_date,
+    planned_budget: Number(payload.planned_budget) || 0,
+    category_budgets: payload.category_budgets || {},
+  };
+  const tryRoutes = [
+    () => api.post(`/festivals/${uid}/events`, body),
+    () => api.post(`/festivals/${uid}/planner/event`, body),
+  ];
+  let lastErr;
+  for (const call of tryRoutes) {
     try {
-      return await request(api.post(`/festivals/${uid}/events`, payload));
-    } catch (e2) {
-      if (!is404(e2)) throw e2;
-      const amount = Number(payload.planned_budget) || 0;
-      if (amount <= 0) {
-        throw new Error(
-          "Backend route missing. Restart with .\\start-backend.ps1 (port 8002) or enter a planned budget > 0.",
-        );
-      }
-      const goal = await postPurchaseAddGoal(uid, {
-        item_name: payload.festival_name,
-        target_amount: amount,
-        target_date: payload.festival_date,
-        category: "CELEBRATION",
-        priority: "MEDIUM",
-        display_timeline_label: payload.festival_name,
-        linked_festival_key: String(payload.festival_name || "")
-          .trim()
-          .toLowerCase()
-          .replace(/\s+/g, "_"),
-      });
-      return { success: true, fallback: "purchase_goal", goal };
+      return await request(call());
+    } catch (e) {
+      lastErr = e;
+      if (!is404(e)) throw e;
     }
   }
+  const amount = body.planned_budget;
+  try {
+    await request(
+      api.post(`/festivals/${uid}/set-budget`, {
+        festival_name: payload.festival_name,
+        planned_budget: amount > 0 ? amount : Math.max(amount, 5000),
+        festival_date: payload.festival_date,
+        category_budgets: body.category_budgets,
+      }),
+    );
+    const listed = await getFestivals(uid);
+    const match = (listed?.upcoming_festivals || []).find(
+      (f) =>
+        String(f.festival_name || "").toLowerCase() ===
+          String(payload.festival_name || "").toLowerCase() &&
+        String(f.festival_date || "").slice(0, 10) === String(payload.festival_date || "").slice(0, 10),
+    );
+    if (match) return { success: true, event: match };
+  } catch {
+    /* fall through */
+  }
+  if (lastErr && !is404(lastErr)) throw lastErr;
+  throw new Error(STALE_BACKEND_HINT);
 };
 
 export const getFestivalEventDetails = async (userId, festivalName, festivalDate, refresh = true) => {
@@ -776,7 +940,7 @@ export const putFestivalImportantDayReminder = async (userId, eventId, payload) 
   try {
     return await request(api.put(`/festivals/${uid}/planner/reminder/${eid}`, payload));
   } catch (e) {
-    if (String(e.message || "").toLowerCase().includes("not found")) {
+    if (isHttpNotFound(e)) {
       return request(api.put(`/festivals/${uid}/important-days/${eid}/reminder`, payload));
     }
     throw e;
@@ -794,8 +958,30 @@ export const putPurchaseUpdateSavings = async (userId, goalId, amountSaved) =>
 export const deletePurchaseGoal = async (userId, goalId) =>
   request(api.delete(`/purchases/${userId}/${goalId}`));
 
-export const completePurchaseGoal = async (userId, goalId) =>
-  request(api.post(`/purchases/${userId}/${goalId}/complete`));
+export const completePurchaseGoal = async (userId, goalId) => {
+  const uid = apiUserId(userId);
+  const gid =
+    typeof goalId === "number" && Number.isFinite(goalId)
+      ? goalId
+      : Number(goalId);
+  if (!Number.isFinite(gid) || gid < 1 || !Number.isInteger(gid)) {
+    throw new Error("Invalid goal id. Refresh the page and try again.");
+  }
+  try {
+    return await request(api.post(`/purchases/${uid}/${gid}/complete`));
+  } catch (e) {
+    const msg = String(e?.message || "");
+    if (!/not found/i.test(msg)) throw e;
+    try {
+      return await request(api.post(`/purchases/${uid}/goals/${gid}/complete`));
+    } catch (e2) {
+      if (/not found/i.test(String(e2?.message || ""))) {
+        throw new Error(STALE_BACKEND_HINT);
+      }
+      throw e2;
+    }
+  }
+};
 
 /** Postpone purchase goal by months (Purchase Planner or EMI). */
 export const postPurchasePostponeMonths = async (userId, goalId, postponeMonths) =>

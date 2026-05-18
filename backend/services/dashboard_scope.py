@@ -70,3 +70,13 @@ def fetch_dashboard_mode(cur, user_id: int) -> str:
     )
     row = cur.fetchone()
     return normalize_dashboard_mode(row[0] if row else "merged")
+
+
+def resolve_scope_mode(cur, user_id: int, scope: str | None = None) -> str:
+    """
+    Prefer explicit ``scope`` from the request (frontend view switch) so all modules
+    stay in sync before/after DB persistence; fall back to users.dashboard_mode.
+    """
+    if scope is not None and str(scope).strip():
+        return normalize_dashboard_mode(scope)
+    return fetch_dashboard_mode(cur, user_id)

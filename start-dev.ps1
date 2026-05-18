@@ -57,17 +57,30 @@ Start-Process powershell -WorkingDirectory $root -ArgumentList @(
     "-NoExit", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $root "start-backend.ps1"), "-Port", "8002"
 )
 
-Write-Host "[start-dev] Waiting 15s for migrations + uvicorn to start..." -ForegroundColor Yellow
-Start-Sleep -Seconds 15
+Write-Host "[start-dev] Waiting 8s for migrations + uvicorn..." -ForegroundColor Yellow
+Start-Sleep -Seconds 8
 
-# ── 6. Verify backend is alive ────────────────────────────────────────────────
+# ── 6. Verify backend is alive (8002, then 8003/8001 fallbacks via .backend-port) ─
 $backendOk = $false
-for ($i = 0; $i -lt 3; $i++) {
-    try {
-        $r = (Invoke-WebRequest "http://127.0.0.1:8002/health" -TimeoutSec 5 -UseBasicParsing).StatusCode
-        if ($r -eq 200) { $backendOk = $true; break }
-    } catch { }
-    Start-Sleep -Seconds 5
+$healthPorts = @(8002, 8003, 8004, 8001)
+$portFile = Join-Path $root "frontend\.backend-port"
+if (Test-Path -LiteralPath $portFile) {
+    $fromFile = [int](Get-Content -Raw $portFile)
+    if ($fromFile -gt 0) { $healthPorts = @($fromFile) + $healthPorts | Select-Object -Unique }
+}
+foreach ($try in 1..6) {
+    foreach ($hp in $healthPorts) {
+        try {
+            $body = (Invoke-WebRequest "http://127.0.0.1:$hp/health" -TimeoutSec 4 -UseBasicParsing).Content
+            if ($body -match '"status"\s*:\s*"healthy"') {
+                $backendOk = $true
+                Write-Host "[start-dev] Backend healthy on port $hp" -ForegroundColor Green
+                break
+            }
+        } catch { }
+    }
+    if ($backendOk) { break }
+    Start-Sleep -Seconds 4
 }
 
 if ($backendOk) {

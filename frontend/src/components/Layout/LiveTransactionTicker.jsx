@@ -102,7 +102,7 @@ export default function LiveTransactionTicker({ userId, onTabChange }) {
             aria-hidden
           />
         ) : error ? (
-          <span className="text-[11px] text-gray-500">Connection paused</span>
+          <span className="text-[11px] text-gray-500">Live feed syncing…</span>
         ) : !transaction ? (
           <span className="text-[11px] text-gray-500">No recent activity</span>
         ) : (

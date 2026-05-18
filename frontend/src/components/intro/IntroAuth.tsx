@@ -23,6 +23,7 @@ import {
   useState,
 } from "react";
 import { useAuth } from "../../context/AuthContext";
+import { pingBackendHealth, waitForBackendReady } from "../../services/api";
 import { AuroraBackground } from "./AuroraBackground";
 import { GlassCard } from "./GlassCard";
 import { GradientButton } from "./GradientButton";
@@ -176,14 +177,15 @@ function SocialBtn({
 
 /* ============================ Showcase column ============================ */
 
-function ShowcasePanel({ mode }: { mode: AuthMode }) {
+function ShowcasePanel({ mode, lite }: { mode: AuthMode; lite: boolean }) {
   const reduce = useReducedMotion();
+  const staticPreview = lite || Boolean(reduce);
 
   return (
     <div className="relative h-full w-full overflow-hidden">
       {/* Animated mesh-gradient panel */}
       <div
-        className={`absolute inset-0 ${reduce ? "" : "animate-ss-mesh"} bg-[length:300%_300%]`}
+        className={`absolute inset-0 ${staticPreview ? "" : "animate-ss-mesh"} bg-[length:300%_300%]`}
         style={{
           backgroundImage:
             "radial-gradient(at 18% 22%, rgba(124,58,237,0.55) 0px, transparent 55%), radial-gradient(at 80% 18%, rgba(236,72,153,0.45) 0px, transparent 55%), radial-gradient(at 65% 78%, rgba(34,211,238,0.4) 0px, transparent 55%), radial-gradient(at 22% 82%, rgba(168,85,247,0.45) 0px, transparent 55%), linear-gradient(135deg, #0F0A2E 0%, #070418 100%)",
@@ -213,11 +215,13 @@ function ShowcasePanel({ mode }: { mode: AuthMode }) {
           className="relative h-full w-full"
           style={{ transformStyle: "preserve-3d" }}
           animate={
-            reduce
+            staticPreview
               ? undefined
               : { rotateY: [-12, -8, -12], rotateX: [6, 4, 6], y: [0, -12, 0] }
           }
-          transition={{ duration: 9, repeat: Infinity, ease: "easeInOut" }}
+          transition={
+            staticPreview ? undefined : { duration: 9, repeat: Infinity, ease: "easeInOut" }
+          }
         >
           <DashboardPreview />
         </motion.div>
@@ -227,16 +231,19 @@ function ShowcasePanel({ mode }: { mode: AuthMode }) {
           label="+₹12,400 saved"
           color="cyan"
           orbit={{ x: -240, y: -120, delay: 0 }}
+          staticPreview={staticPreview}
         />
         <OrbitingChip
           label="Fraud blocked"
           color="magenta"
           orbit={{ x: 230, y: -80, delay: 1.4 }}
+          staticPreview={staticPreview}
         />
         <OrbitingChip
           label="Goal · 78%"
           color="violet"
           orbit={{ x: 200, y: 160, delay: 2.6 }}
+          staticPreview={staticPreview}
         />
       </motion.div>
 
@@ -358,12 +365,15 @@ function OrbitingChip({
   label,
   color,
   orbit,
+  staticPreview = false,
 }: {
   label: string;
   color: "cyan" | "magenta" | "violet";
   orbit: { x: number; y: number; delay: number };
+  staticPreview?: boolean;
 }) {
   const reduce = useReducedMotion();
+  const still = staticPreview || Boolean(reduce);
 
   const tone =
     color === "cyan"
@@ -378,7 +388,7 @@ function OrbitingChip({
       style={{ boxShadow: tone.glow }}
       initial={{ opacity: 0, x: orbit.x, y: orbit.y, scale: 0.9 }}
       animate={
-        reduce
+        still
           ? { opacity: 1, x: orbit.x, y: orbit.y, scale: 1 }
           : {
               opacity: 1,
@@ -389,7 +399,7 @@ function OrbitingChip({
       }
       transition={{
         duration: 7,
-        repeat: reduce ? 0 : Infinity,
+        repeat: still ? 0 : Infinity,
         ease: "easeInOut",
         delay: orbit.delay,
       }}
@@ -408,6 +418,7 @@ export function IntroAuth({
   shieldLayoutId = "ssShieldMark",
 }: IntroAuthProps) {
   const reduce = useReducedMotion();
+  const authLite = reduce || process.env.NODE_ENV === "development";
   const { signin, signup } = useAuth();
 
   const [mode, setMode] = useState<AuthMode>(initialMode);
@@ -419,7 +430,37 @@ export function IntroAuth({
   const [busy, setBusy] = useState(false);
   const [success, setSuccess] = useState(false);
   const [error, setError] = useState("");
+  const [apiOnline, setApiOnline] = useState<boolean | null>(null);
+  const [apiChecking, setApiChecking] = useState(false);
   const successTimerRef = useRef<number | null>(null);
+
+  const checkApi = useCallback(async () => {
+    setApiChecking(true);
+    try {
+      const ok = await waitForBackendReady(28000);
+      setApiOnline(ok);
+      return ok;
+    } finally {
+      setApiChecking(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const ok = await waitForBackendReady(35000);
+      if (!cancelled) setApiOnline(ok);
+    })();
+    const pollId = window.setInterval(async () => {
+      if (cancelled) return;
+      const ok = await pingBackendHealth(4000);
+      if (ok) setApiOnline(true);
+    }, 10000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(pollId);
+    };
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -472,7 +513,7 @@ export function IntroAuth({
     <div className="relative min-h-[100dvh] w-full overflow-hidden bg-[#070418] font-sans text-ss-ink">
       {/* Mobile background */}
       <div className="lg:hidden">
-        <AuroraBackground starCount={36} />
+        <AuroraBackground starCount={authLite ? 14 : 36} />
       </div>
 
       {/* Back button — kept absolute, unchanged position/style. The SmartSpend
@@ -496,7 +537,7 @@ export function IntroAuth({
           className="relative h-[35vh] min-h-[260px] w-full overflow-hidden lg:h-auto lg:min-h-[100dvh] lg:w-[55%]"
           aria-hidden
         >
-          <ShowcasePanel mode={mode} />
+          <ShowcasePanel mode={mode} lite={authLite} />
         </aside>
 
         {/* RIGHT — form panel */}
@@ -571,6 +612,33 @@ export function IntroAuth({
                 </p>
               </motion.div>
             </AnimatePresence>
+
+            {/* Backend offline (dev) */}
+            {apiOnline === false ? (
+              <motion.div
+                initial={{ opacity: 0, y: -6 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="mt-5 rounded-2xl border border-amber-400/35 bg-amber-500/[0.10] px-4 py-3 text-[13px] leading-relaxed text-amber-100"
+                role="status"
+              >
+                <p>
+                  API is not reachable. Run{" "}
+                  <code className="rounded bg-black/30 px-1 py-0.5 text-[12px]">.\start-dev.ps1</code>{" "}
+                  (backend port 8002 + frontend), wait until the backend window shows healthy, then click
+                  Retry.
+                </p>
+                <button
+                  type="button"
+                  disabled={apiChecking}
+                  onClick={() => {
+                    void checkApi();
+                  }}
+                  className="mt-3 rounded-lg border border-amber-300/40 bg-amber-500/20 px-4 py-2 text-[12px] font-semibold text-amber-50 transition hover:bg-amber-500/30 disabled:opacity-50"
+                >
+                  {apiChecking ? "Checking API…" : "Retry connection"}
+                </button>
+              </motion.div>
+            ) : null}
 
             {/* Error */}
             <AnimatePresence>

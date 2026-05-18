@@ -33,6 +33,13 @@ export function setSubscriptionFlowConnected(userId, appIds) {
       grantedAt: new Date().toISOString(),
     })
   );
+  try {
+    window.dispatchEvent(
+      new CustomEvent("ss-subscription-flow-changed", { detail: { userId: Number(userId) || 0 } })
+    );
+  } catch {
+    /* ignore */
+  }
 }
 
 export function mergeSubscriptionApps(userId, newIds) {

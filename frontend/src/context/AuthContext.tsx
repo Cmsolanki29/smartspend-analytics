@@ -21,6 +21,8 @@ import {
 import { clearClientSessionState } from "../utils/sessionReset";
 
 const SPLASH_SEEN_KEY = "smartspend_splash_seen";
+/** Never block the UI longer than this on cold load (deploy + local dev). */
+const AUTH_BOOT_TIMEOUT_MS = 8000;
 
 /** Shape returned by GET /auth/me (minimal fields used in UI). */
 export type AuthUser = {
@@ -60,7 +62,7 @@ const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => Boolean(getAccessToken()));
 
   const loadMe = useCallback(async (options?: LoadMeOptions) => {
     const token = getAccessToken();
@@ -98,8 +100,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      if (!getAccessToken()) {
+        setUser(null);
+        setLoading(false);
+        return;
+      }
       setLoading(true);
-      await loadMe();
+      try {
+        await Promise.race([
+          loadMe(),
+          new Promise<never>((_, reject) => {
+            window.setTimeout(() => reject(new Error("auth_boot_timeout")), AUTH_BOOT_TIMEOUT_MS);
+          }),
+        ]);
+      } catch {
+        clearAuthTokens();
+        setUser(null);
+      }
       if (!cancelled) setLoading(false);
     })();
     return () => {
@@ -127,6 +144,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setAuthTokens(data.access_token, data.refresh_token);
       try {
         sessionStorage.setItem(SPLASH_SEEN_KEY, "true");
+        if (data?.onboarding_required !== false) {
+          sessionStorage.setItem("ss_source_selection", "1");
+        }
       } catch {
         /* ignore */
       }

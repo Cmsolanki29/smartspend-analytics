@@ -50,6 +50,34 @@ def calculate_health_score(
         )
         scope_sql = transaction_scope_sql("t", mode)
 
+        cur.execute(
+            f"""
+            SELECT COUNT(*), COUNT(DISTINCT t.transaction_date::date)
+            FROM transactions t
+            WHERE t.user_id = %s
+              AND t.transaction_date >= (CURRENT_DATE - INTERVAL '90 days')
+              AND ({scope_sql});
+            """,
+            (user_id,),
+        )
+        txn_row = cur.fetchone()
+        txn_count = int((txn_row or [0, 0])[0] or 0)
+        distinct_days = int((txn_row or [0, 0])[1] or 0)
+        if txn_count < 10:
+            return HealthScoreResponse(
+                score=None,
+                grade="",
+                components={},
+                trend="STABLE",
+                recommendations=[],
+                savings_rate=None,
+                reason="not_enough_data",
+                message="Upload more statements to calculate your Health Score",
+                days_needed=30,
+                days_available=distinct_days,
+                mode=mode,
+            )
+
         row = None
         if not is_current_month:
             cur.execute(
@@ -253,6 +281,7 @@ def calculate_health_score(
             trend=trend,
             recommendations=recs[:6],
             savings_rate=savings_rate,
+            mode=mode,
         )
     finally:
         cur.close()

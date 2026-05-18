@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useViewMode } from "../context/ViewModeContext";
 import {
   getAnomalies,
   getAnomalyStats,
@@ -7,6 +8,7 @@ import {
   getQuickSummary,
   getSpendingAnalysis,
   getTopMerchants,
+  waitForBackendReady,
 } from "../services/api";
 
 const DASHBOARD_KEYS = ["summary", "spending", "trends", "anomalies", "anomalyStats", "health", "merchants"];
@@ -21,92 +23,155 @@ const EMPTY_DATA = {
   merchants: [],
 };
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+function applyResult(next, key, result) {
+  if (result.status !== "fulfilled") {
+    const msg = result.reason?.message || String(result.reason || "request failed");
+    return { warning: `${key}: ${msg}` };
+  }
+  const v = result.value;
+  switch (key) {
+    case "summary":
+      next.summary = v;
+      break;
+    case "spending":
+      next.spending = Array.isArray(v) ? v : [];
+      break;
+    case "trends":
+      next.trends = Array.isArray(v) ? v : [];
+      break;
+    case "anomalies":
+      next.anomalies = Array.isArray(v) ? v : [];
+      break;
+    case "anomalyStats":
+      next.anomalyStats = v ?? null;
+      break;
+    case "health":
+      next.health = v ?? null;
+      break;
+    case "merchants":
+      next.merchants = Array.isArray(v) ? v : [];
+      break;
+    default:
+      break;
+  }
+  return { warning: null };
+}
+
+/** Map quick-summary health fields when /health-score is still loading. */
+function healthFromSummary(summary) {
+  if (!summary || summary.health_score == null) return null;
+  return {
+    score: summary.health_score,
+    grade: summary.health_grade,
+    trend: "STABLE",
+    recommendations: [],
+    components: {},
+  };
+}
 
 export const useSmartSpend = (userId, month, year) => {
+  const { viewMode } = useViewMode();
   const [data, setData] = useState(EMPTY_DATA);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [loadWarnings, setLoadWarnings] = useState([]);
+  const loadGen = useRef(0);
 
   const load = useCallback(async () => {
     if (!userId) return;
+    const gen = ++loadGen.current;
     setLoading(true);
     setError("");
     setLoadWarnings([]);
 
-    const runAll = () => Promise.allSettled([
-      getQuickSummary(userId, { month, year }),
-      getSpendingAnalysis(userId, month, year),
-      getMonthlyTrends(userId),
-      getAnomalies(userId),
-      getAnomalyStats(userId),
-      getHealthScore(userId, month, year),
-      getTopMerchants(userId, month, year),
-    ]);
+    await waitForBackendReady(25000);
+
+    const next = { ...EMPTY_DATA };
+    const warnings = [];
+
+    const runWave = async (calls) => {
+      const settled = await Promise.allSettled(calls.map((c) => c.fn()));
+      settled.forEach((result, i) => {
+        const { key } = calls[i];
+        const out = applyResult(next, key, result);
+        if (out.warning) warnings.push(out.warning);
+      });
+      return settled;
+    };
 
     try {
-      let settled = await runAll();
+      // Wave 1 — KPIs + charts (avoid hammering DB with 7 parallel heavy queries)
+      await runWave([
+        {
+          key: "summary",
+          fn: () => getQuickSummary(userId, { month, year, scope: viewMode }),
+        },
+        {
+          key: "trends",
+          fn: () => getMonthlyTrends(userId, viewMode),
+        },
+        {
+          key: "spending",
+          fn: () => getSpendingAnalysis(userId, month, year, viewMode),
+        },
+      ]);
 
-      // Auto-retry once after 1.8s for transient network blips (CRA proxy restart, etc.)
-      const allFailed = settled.every((r) => r.status === "rejected");
-      if (allFailed) {
-        await sleep(1800);
-        settled = await runAll();
+      if (gen !== loadGen.current) return;
+
+      if (next.summary && !next.health) {
+        next.health = healthFromSummary(next.summary);
       }
 
-      const next = { ...EMPTY_DATA };
-      const warnings = [];
+      setData({ ...next });
+      setLoadWarnings([...warnings]);
+      setLoading(false);
 
-      settled.forEach((result, i) => {
-        const key = DASHBOARD_KEYS[i];
-        if (result.status === "fulfilled") {
-          const v = result.value;
-          switch (key) {
-            case "summary":      next.summary = v; break;
-            case "spending":     next.spending = Array.isArray(v) ? v : []; break;
-            case "trends":       next.trends = Array.isArray(v) ? v : []; break;
-            case "anomalies":    next.anomalies = Array.isArray(v) ? v : []; break;
-            case "anomalyStats": next.anomalyStats = v ?? null; break;
-            case "health":       next.health = v ?? null; break;
-            case "merchants":    next.merchants = Array.isArray(v) ? v : []; break;
-            default: break;
-          }
-        } else {
-          const msg = result.reason?.message || String(result.reason || "request failed");
-          warnings.push(`${key}: ${msg}`);
-          if (process.env.NODE_ENV === "development") {
-            console.warn("[useSmartSpend] endpoint failed:", key, result.reason);
-          }
-        }
-      });
+      // Wave 2 — secondary widgets (UI already visible)
+      await runWave([
+        { key: "anomalies", fn: () => getAnomalies(userId, null, viewMode) },
+        { key: "anomalyStats", fn: () => getAnomalyStats(userId, viewMode) },
+        { key: "health", fn: () => getHealthScore(userId, month, year, viewMode) },
+        { key: "merchants", fn: () => getTopMerchants(userId, month, year, viewMode) },
+      ]);
 
-      if (settled.every((r) => r.status === "rejected")) {
-        const first = settled[0]?.reason;
-        setError(first?.message || "Unable to reach server — check your connection");
+      if (gen !== loadGen.current) return;
+
+      if (!next.health && next.summary) {
+        next.health = healthFromSummary(next.summary);
+      }
+
+      const criticalMissing = !next.trends?.length && !next.spending?.length && !next.summary;
+      if (warnings.length >= 5 && criticalMissing) {
+        setError(
+          "Dashboard data could not load. Run .\\start-dev.ps1, wait until the backend is healthy, then click Retry."
+        );
       } else {
         setError("");
       }
 
-      setLoadWarnings(warnings);
-      setData(next);
+      setLoadWarnings(warnings.filter((w) => !w.includes("anomalyStats")));
+      setData({ ...next });
     } catch (err) {
-      setError(err.message || "Unable to load dashboard data");
+      if (gen !== loadGen.current) return;
+      setError(err?.message || "Unable to load dashboard data.");
     } finally {
-      setLoading(false);
+      if (gen === loadGen.current) setLoading(false);
     }
-  }, [userId, month, year]);
+  }, [userId, month, year, viewMode]);
 
   useEffect(() => {
     load();
   }, [load]);
 
-  // Re-fetch immediately whenever the user changes their dashboard mode from Settings.
   useEffect(() => {
-    const handler = () => load();
-    window.addEventListener("dashboardModeChanged", handler);
-    return () => window.removeEventListener("dashboardModeChanged", handler);
-  }, [load]);
+    const handler = (ev) => {
+      const uid = Number(ev?.detail?.user_id);
+      if (uid && uid !== Number(userId)) return;
+      load();
+    };
+    window.addEventListener("smartspend:data-updated", handler);
+    return () => window.removeEventListener("smartspend:data-updated", handler);
+  }, [userId, load]);
 
   return {
     ...data,

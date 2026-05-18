@@ -185,6 +185,13 @@ def signup(
                 (user_id,),
             )
 
+        try:
+            from services.onboarding_seed import seed_ghost_connected_sources
+
+            seed_ghost_connected_sources(cur, user_id)
+        except Exception as ghost_exc:  # noqa: BLE001
+            logger.warning("ghost source seed skipped user_id=%s: %s", user_id, ghost_exc)
+
         access = create_access_token(user_id=user_id, email=str(user.email))
         refresh = create_refresh_token(user_id=user_id)
         client_host = request.client.host if request.client else None
@@ -208,6 +215,8 @@ def signup(
             access_token=access,
             refresh_token=refresh,
             expires_in=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+            user_id=user_id,
+            onboarding_required=True,
         )
     except HTTPException:
         raise

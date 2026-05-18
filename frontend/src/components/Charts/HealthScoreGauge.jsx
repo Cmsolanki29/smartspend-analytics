@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { motion, useReducedMotion } from "framer-motion";
 import { ArrowDownRight, ArrowUpRight, Minus, RefreshCw } from "lucide-react";
 import { getHealthHistory, getHealthNarrative } from "../../services/api";
+import { EmptyState } from "../common/EmptyState";
 import { GlassCard } from "../intro/GlassCard";
 import PremiumCard from "../Dashboard/shared/PremiumCard";
 
@@ -302,6 +303,8 @@ const HealthScoreGauge = ({
 }) => {
   const reduce = useReducedMotion();
   const rawScore = healthData.score;
+  const insufficientData =
+    healthData?.reason === "not_enough_data" || rawScore == null || rawScore === undefined;
   const [displayScore, setDisplayScore] = useState(0);
   const rafRef = useRef(null);
 
@@ -445,6 +448,23 @@ const HealthScoreGauge = ({
             <Breakdown key={label} label={label} value={null} max={max} delayMs={i * 200} />
           ))}
         </div>
+      </GlassCard>
+    );
+  }
+
+  if (insufficientData && !loading && !loadError) {
+    return (
+      <GlassCard padding="md" surface="panel" className="border-white/[0.08]">
+        <EmptyState
+          icon="📊"
+          title="Health Score Not Available Yet"
+          subtitle={healthData.message || "Upload more statements to calculate your Health Score"}
+          hint={
+            healthData.days_needed
+              ? `Upload about ${healthData.days_needed} days of data (${healthData.days_available ?? 0} days available)`
+              : undefined
+          }
+        />
       </GlassCard>
     );
   }

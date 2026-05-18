@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from "react";
 import { Landmark, CreditCard, Eye, EyeOff, Plus, Trash2 } from "lucide-react";
 import { getConnectedSources, toggleSourceVisibility, updateDashboardMode, deleteConnectedSource } from "../../services/api";
 import { useAuth } from "../../context/AuthContext";
+import { useViewMode, normalizeViewMode } from "../../context/ViewModeContext";
 
 function iconForType(t) {
   if (t === "credit_card") return CreditCard;
@@ -38,6 +39,7 @@ function normalizeModeId(id) {
 
 export default function ConnectedAccountsSettings({ userId, onGoUpload }) {
   const { reloadUser, user } = useAuth();
+  const { switchViewMode } = useViewMode();
   const [sources, setSources] = useState([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
@@ -135,22 +137,14 @@ export default function ConnectedAccountsSettings({ userId, onGoUpload }) {
     setSaveOk(false);
     try {
       const visibleIds = sources.filter((s) => s.is_visible_on_dashboard).map((s) => s.id);
-      const resp = await updateDashboardMode({ userId, mode, visibleSourceIds: visibleIds });
-      const savedMode = resp?.mode ? normalizeModeId(mapDashboardModeString(resp.mode)) : mode;
-      if (resp?.mode) setMode(savedMode);
-      await reloadUser();
+      const savedMode = await switchViewMode(normalizeViewMode(mode), {
+        userId,
+        visibleSourceIds: visibleIds,
+      });
+      if (savedMode) setMode(normalizeModeId(mapDashboardModeString(savedMode)));
       await load();
       setSaveOk(true);
       window.setTimeout(() => setSaveOk(false), 3200);
-      // Notify Dashboard + InsightsTab + AIInsightsPanel to re-fetch with the new mode
-      try {
-        window.dispatchEvent(new CustomEvent("dashboardModeChanged", { detail: { mode: savedMode, userId } }));
-        window.dispatchEvent(new CustomEvent("smartspend:health-score-changed", { detail: { userId } }));
-        window.dispatchEvent(new CustomEvent("smartspend:purchase-goals-changed", { detail: { userId } }));
-        window.dispatchEvent(new CustomEvent("smartspend-financial-sync", { detail: { userId } }));
-      } catch {
-        /* ignore */
-      }
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Could not save dashboard mode");
     } finally {

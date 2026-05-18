@@ -13,7 +13,10 @@
  * - Empty state with 4 starter chips
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { TOKEN_ACCESS_KEY } from "../../services/api";
+import { useAuth } from "../../context/AuthContext";
+import { useAppData } from "../../context/AppDataContext";
+import { useViewMode } from "../../context/ViewModeContext";
+import { getLinkedAccounts, TOKEN_ACCESS_KEY } from "../../services/api";
 import { renderMarkdownLite, TypewriterText } from "../common/TypewriterText";
 
 const MONTH_LABELS = [
@@ -226,6 +229,25 @@ const STARTER_CHIPS = [
   "Where am I spending the most?",
 ];
 
+const FULL_FEATURE_BUTTONS = [
+  { id: "spending", label: "💸 Where I Spend Most" },
+  { id: "categories", label: "📊 Top Categories" },
+  { id: "unusual", label: "⚠️ Unusual Transactions" },
+  { id: "trend", label: "📈 Monthly Trend" },
+  { id: "savings", label: "💡 Savings Tips" },
+];
+
+const LIMITED_FEATURE_BUTTONS = [
+  { id: "spending", label: "💸 Quick Spend Summary" },
+  { id: "categories", label: "📊 Category Overview" },
+];
+
+function featureButtonsForScope(scope) {
+  if (scope === "linked_full") return FULL_FEATURE_BUTTONS;
+  if (scope === "unlinked_same_bank") return LIMITED_FEATURE_BUTTONS;
+  return [];
+}
+
 // ── Main component ─────────────────────────────────────────────────────────
 /**
  * @param {(route: { path?: string, tab?: string, label?: string }) => void} [onNavigate]
@@ -234,6 +256,10 @@ const STARTER_CHIPS = [
  * @param {string} [dashboardScope] — merged | bank_only | credit_card_only
  */
 export default function SmartSpendChatbot({ onNavigate, month, year, dashboardScope = "merged" }) {
+  const { user } = useAuth();
+  const { viewMode } = useViewMode();
+  const { linkedAccounts, refreshLinkedAccounts } = useAppData();
+  const effectiveScope = dashboardScope || viewMode || "merged";
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -241,6 +267,8 @@ export default function SmartSpendChatbot({ onNavigate, month, year, dashboardSc
   const [llmOnline, setLlmOnline] = useState(true);
   const [uploadBanner, setUploadBanner] = useState(null);
   const [uploadedDocMeta, setUploadedDocMeta] = useState(null);
+  const [docContext, setDocContext] = useState(null);
+  const [featureButtons, setFeatureButtons] = useState([]);
   const [identityScope, setIdentityScope] = useState(null);
   const bottomRef = useRef(null);
   const fileRef = useRef(null);
@@ -249,7 +277,8 @@ export default function SmartSpendChatbot({ onNavigate, month, year, dashboardSc
   const contextMonth = Number(month) || new Date().getMonth() + 1;
   const contextYear = Number(year) || new Date().getFullYear();
   const monthLabel = MONTH_LABELS[contextMonth - 1] || MONTH_LABELS[0];
-  const dashboardModeLabel = DASHBOARD_MODE_LABELS[dashboardScope] || dashboardScope;
+  const dashboardModeLabel = DASHBOARD_MODE_LABELS[effectiveScope] || effectiveScope;
+  const firstName = (user?.name || "").trim().split(/\s+/)[0] || "there";
 
   const token = () => localStorage.getItem(TOKEN_ACCESS_KEY) || "";
   const authHeaders = () => ({ Authorization: `Bearer ${token()}` });
@@ -261,11 +290,41 @@ export default function SmartSpendChatbot({ onNavigate, month, year, dashboardSc
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
 
-  // Init session
+  const prevScopeRef = useRef(effectiveScope);
+  useEffect(() => {
+    if (prevScopeRef.current === effectiveScope) return;
+    prevScopeRef.current = effectiveScope;
+    setDocContext(null);
+    setFeatureButtons([]);
+    setUploadedDocMeta(null);
+    setIdentityScope(null);
+    setUploadBanner(null);
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: `sys-mode-${Date.now()}`,
+        role: "system",
+        content: `Switched to ${dashboardModeLabel} view. How can I help, ${firstName}?`,
+        timestamp: Date.now(),
+      },
+    ]);
+  }, [effectiveScope, dashboardModeLabel, firstName]);
+
+  // Init session + linked accounts (system prompt context)
   useEffect(() => {
     let cancelled = false;
     async function init() {
       try {
+        if (user?.id) {
+          await refreshLinkedAccounts();
+          const linked = await getLinkedAccounts(user.id).catch(() => null);
+          const sources = linked?.linked_accounts || linked?.sources || [];
+          const hasLedger = sources.some((s) => Number(s.transactions_count) > 0);
+          if (!cancelled) {
+            setIdentityScope(hasLedger ? "linked_full" : "unlinked_foreign");
+            setFeatureButtons(featureButtonsForScope(hasLedger ? "linked_full" : ""));
+          }
+        }
         const res = await fetch("/api/ai/session", { headers: authHeaders() });
         if (!res.ok) return;
         const data = await res.json();
@@ -276,8 +335,7 @@ export default function SmartSpendChatbot({ onNavigate, month, year, dashboardSc
     }
     init();
     return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [user?.id, refreshLinkedAccounts]);
 
   // Core send / stream
   const doSend = useCallback(
@@ -306,7 +364,7 @@ export default function SmartSpendChatbot({ onNavigate, month, year, dashboardSc
               message: text,
               session_id: sid || sessionId,
               is_first_message: isFirstMessage,
-              dashboard_scope: dashboardScope,
+              dashboard_scope: effectiveScope,
               context_month: contextMonth,
               context_year: contextYear,
               uploaded_doc_metadata: uploadedDocMeta,
@@ -374,8 +432,30 @@ export default function SmartSpendChatbot({ onNavigate, month, year, dashboardSc
         setLoading(false);
       }
     },
-    [sessionId, dashboardScope, contextMonth, contextYear, uploadedDocMeta]
+    [sessionId, effectiveScope, contextMonth, contextYear, uploadedDocMeta]
   );
+
+  const featureQueries = useCallback(
+    (featureId) => {
+      const inst = docContext?.institution || uploadedDocMeta?.institution_name || "this statement";
+      const map = {
+        spending: `Analyze where ${firstName} spends the most in this ${inst} statement`,
+        categories: `Break down spending by category for this ${inst} statement`,
+        unusual: `Find any unusual or suspicious transactions in this ${inst} statement`,
+        trend: `Show monthly spending trend for this ${inst} statement`,
+        savings: `Give savings tips based on this ${inst} statement`,
+      };
+      return map[featureId] || `Summarize this ${inst} statement for ${firstName}`;
+    },
+    [docContext, uploadedDocMeta, firstName]
+  );
+
+  const handleFeatureClick = (featureId) => {
+    if (!docContext || loading) return;
+    const q = featureQueries(featureId);
+    setMessages((prev) => [...prev, { id: `u-feat-${Date.now()}`, role: "user", content: q, timestamp: Date.now() }]);
+    void doSend(q, sessionId);
+  };
 
   const handleSend = () => {
     if (!input.trim() || loading) return;
@@ -405,27 +485,63 @@ export default function SmartSpendChatbot({ onNavigate, month, year, dashboardSc
       if (!res.ok) throw new Error(`Upload ${res.status}`);
       const result = await res.json();
       setUploadBanner({ state: "done", ...result });
+      const inst =
+        result.institution ||
+        result.doc_info?.institution_name ||
+        result.uploaded_doc_metadata?.institution_name ||
+        "your bank";
+      const scope = result.identity_scope || result.identity_scope_detail?.scope;
+      const limited = scope === "unlinked_same_bank";
       if (result.doc_info || result.uploaded_doc_metadata) {
         setUploadedDocMeta({
           ...(result.uploaded_doc_metadata || {}),
           ...(result.doc_info || {}),
-          identity_scope: result.identity_scope,
+          identity_scope: scope,
           identity_reason: result.reason,
         });
       }
-      // Store identity scope so message renderer can show the Connect Account button
-      setIdentityScope(result.identity_scope || null);
-      if (result.warning_message) {
+      setDocContext({ institution: inst, limited, file: file.name });
+      setFeatureButtons(featureButtonsForScope(scope));
+      setIdentityScope(scope || null);
+
+      if (scope === "linked_full") {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `ai-doc-${Date.now()}`,
+            role: "assistant",
+            content: `Hey ${firstName}! Here's your ${inst} statement — ${result.transaction_count || 0} transactions parsed. Tap a button below or ask anything.`,
+            streaming: false,
+            timestamp: Date.now(),
+          },
+        ]);
+      } else if (scope === "unlinked_same_bank") {
         setMessages((prev) => [
           ...prev,
           {
             id: `sys-${Date.now()}`,
             role: "system",
-            content: result.warning_message,
-            identity_scope: result.identity_scope,
+            content:
+              result.warning_message ||
+              `Hey ${firstName}, this looks like your ${inst} statement, but it isn't linked to SmartSpend yet. Link it in Settings for full analysis.`,
+            identity_scope: scope,
             timestamp: Date.now(),
           },
         ]);
+      } else if (result.warning_message) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `sys-${Date.now()}`,
+            role: "system",
+            content:
+              result.warning_message ||
+              `Hey ${firstName}, this statement appears to belong to a different person. I can't analyze someone else's financial data.`,
+            identity_scope: scope,
+            timestamp: Date.now(),
+          },
+        ]);
+        setFeatureButtons([]);
       }
     } catch {
       setUploadBanner({ state: "error" });
@@ -482,6 +598,8 @@ export default function SmartSpendChatbot({ onNavigate, month, year, dashboardSc
               try { await fetch(`/api/ai/session/${sessionId}`, { method: "DELETE", headers: authHeaders() }); } catch { /* ignore */ }
               setMessages([]);
               setUploadedDocMeta(null);
+              setDocContext(null);
+              setFeatureButtons([]);
               setIdentityScope(null);
               hasUserMessagedRef.current = false;
               try {
@@ -596,6 +714,30 @@ export default function SmartSpendChatbot({ onNavigate, month, year, dashboardSc
         <div className="mx-4 mb-2 shrink-0 flex items-center gap-2 rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-200">
           <span>⚠</span> Upload failed.
           <button type="button" className="ml-auto text-rose-400/60 hover:text-rose-400" onClick={() => setUploadBanner(null)}>×</button>
+        </div>
+      )}
+
+      {(featureButtons.length > 0 ||
+        featureButtonsForScope(
+          linkedAccounts.some((s) => Number(s.transactions_count) > 0) ? "linked_full" : ""
+        ).length > 0) && (
+        <div className="mx-4 mb-2 flex shrink-0 flex-wrap gap-2 border-t border-white/[0.06] pt-3">
+          {(featureButtons.length
+            ? featureButtons
+            : featureButtonsForScope(
+                linkedAccounts.some((s) => Number(s.transactions_count) > 0) ? "linked_full" : ""
+              )
+          ).map((btn) => (
+            <button
+              key={btn.id}
+              type="button"
+              disabled={loading}
+              onClick={() => handleFeatureClick(btn.id)}
+              className="rounded-full border border-violet-500/35 bg-violet-500/10 px-3 py-1.5 text-xs text-violet-200 hover:bg-violet-500/20 disabled:opacity-50"
+            >
+              {btn.label}
+            </button>
+          ))}
         </div>
       )}
 

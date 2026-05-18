@@ -1717,10 +1717,36 @@ button:disabled {
   flex-wrap: wrap;
   gap: 8px;
   align-items: center;
+  flex-shrink: 0;
+  z-index: 1;
 }
 
 .fest-remind-btn {
   min-width: 7.5rem;
+  font-weight: 600;
+  border-width: 1px;
+}
+
+.fest-remind-btn.btn-outline {
+  border-color: color-mix(in srgb, #60a5fa 55%, var(--border-color));
+  color: #e0e7ff;
+  background: color-mix(in srgb, #3b82f6 12%, var(--bg-secondary));
+}
+
+.fest-remind-btn.btn-primary {
+  box-shadow: 0 0 0 1px color-mix(in srgb, #a78bfa 40%, transparent);
+}
+
+@media (max-width: 640px) {
+  .fest-reminder-card {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .fest-reminder-actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
 }
 
 .fest-urgency-plan {

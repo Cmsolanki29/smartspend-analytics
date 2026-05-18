@@ -7,12 +7,21 @@ import time
 from pathlib import Path
 from typing import Any
 
+import math
+
 import numpy as np
 import pandas as pd
 import psycopg2
 from dotenv import load_dotenv
 from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import LabelEncoder, StandardScaler
+
+from services.fraud_trust import (
+    apply_merchant_trust_rule,
+    fetch_merchant_debit_counts_90d,
+    merchant_key_for_row,
+)
+from services.parser_utils import merchant_prefix_key
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 load_dotenv(dotenv_path=_PROJECT_ROOT / ".env")
@@ -21,7 +30,7 @@ load_dotenv(dotenv_path=_PROJECT_ROOT / ".env")
 class EnhancedIsolationForest:
     """
     Enhanced Isolation Forest for financial transaction anomaly detection.
-    Uses 8 engineered features + StandardScaler + per-user category stats.
+    Uses 9 engineered features + StandardScaler + per-user category stats.
     """
 
     DETECTOR_VERSION = "isolation-forest-v2.0"
@@ -104,17 +113,30 @@ class EnhancedIsolationForest:
             label = "Others" if "Others" in le.classes_ else le.classes_[0]
         return float(le.transform([label])[0])
 
-    def engineer_features(self, df: pd.DataFrame, user_id: int) -> np.ndarray:
+    def engineer_features(
+        self,
+        df: pd.DataFrame,
+        user_id: int,
+        *,
+        merchant_counts: dict[str, int] | None = None,
+    ) -> np.ndarray:
         stats = self.user_stats.get(user_id, {})
         overall = stats.get("_overall", {"mean": 1000.0, "std": 500.0})
         o_mean = max(float(overall["mean"]), 1e-6)
         o_std = max(float(overall["std"]), 1e-6)
+        counts = merchant_counts or {}
 
         if user_id not in self.encoders:
             le = LabelEncoder()
             cats = df["category"].fillna("Others").astype(str).tolist()
             le.fit(sorted(set(cats) | {"Others"}))
             self.encoders[user_id] = le
+
+        if "normalized_merchant" not in df.columns:
+            df = df.copy()
+            df["normalized_merchant"] = df["merchant"].apply(
+                lambda m: merchant_prefix_key(str(m or ""))
+            )
 
         feats: list[list[float]] = []
         for _, row in df.iterrows():
@@ -153,6 +175,10 @@ class EnhancedIsolationForest:
             a = abs(amt)
             is_round = 1.0 if (a >= 500 and (a % 1000 == 0 or a % 500 == 0)) else 0.0
 
+            mkey = merchant_key_for_row(row.to_dict())
+            count_90d = int(counts.get(mkey, 0))
+            merchant_debit_count_90d = math.log1p(max(count_90d, 0))
+
             feats.append(
                 [
                     amount_zscore,
@@ -163,6 +189,7 @@ class EnhancedIsolationForest:
                     balance_ratio,
                     cat_encoded,
                     is_round,
+                    merchant_debit_count_90d,
                 ]
             )
 
@@ -181,7 +208,22 @@ class EnhancedIsolationForest:
                 return False
 
             self.compute_user_stats(user_id, df)
-            features = self.engineer_features(train_df, user_id)
+            train_keys = [
+                merchant_prefix_key(str(m or ""))
+                for m in train_df.get("merchant", pd.Series(dtype=str)).tolist()
+            ]
+            conn_counts = self.get_db_connection()
+            cur_counts = conn_counts.cursor()
+            try:
+                train_counts = fetch_merchant_debit_counts_90d(
+                    cur_counts, user_id, train_keys
+                )
+            finally:
+                cur_counts.close()
+                conn_counts.close()
+            features = self.engineer_features(
+                train_df, user_id, merchant_counts=train_counts
+            )
 
             scaler = StandardScaler()
             features_scaled = scaler.fit_transform(features)
@@ -189,7 +231,7 @@ class EnhancedIsolationForest:
 
             model = IsolationForest(
                 n_estimators=200,
-                contamination=0.06,
+                contamination=0.03,
                 random_state=42,
                 max_features=0.8,
             )
@@ -252,7 +294,7 @@ class EnhancedIsolationForest:
             if process_all:
                 cursor.execute(
                     """
-                    SELECT id, amount, type, category, merchant,
+                    SELECT id, amount, type, category, merchant, normalized_merchant,
                            hour_of_day, day_of_week, is_weekend, is_night_txn,
                            transaction_date, balance_after, payment_method
                     FROM transactions
@@ -264,7 +306,7 @@ class EnhancedIsolationForest:
             else:
                 cursor.execute(
                     """
-                    SELECT id, amount, type, category, merchant,
+                    SELECT id, amount, type, category, merchant, normalized_merchant,
                            hour_of_day, day_of_week, is_weekend, is_night_txn,
                            transaction_date, balance_after, payment_method
                     FROM transactions
@@ -281,6 +323,7 @@ class EnhancedIsolationForest:
                 "type",
                 "category",
                 "merchant",
+                "normalized_merchant",
                 "hour_of_day",
                 "day_of_week",
                 "is_weekend",
@@ -294,7 +337,11 @@ class EnhancedIsolationForest:
                 return {"processed": 0, "anomalies_found": 0, "high_risk": 0}
 
             df = pd.DataFrame(rows, columns=cols)
-            features = self.engineer_features(df, user_id)
+            mkeys = [merchant_key_for_row(r) for r in df.to_dict("records")]
+            merchant_counts = fetch_merchant_debit_counts_90d(cursor, user_id, mkeys)
+            features = self.engineer_features(
+                df, user_id, merchant_counts=merchant_counts
+            )
             features_scaled = self.scalers[user_id].transform(features)
 
             model = self.models[user_id]
@@ -310,8 +357,16 @@ class EnhancedIsolationForest:
                 pred = predictions[i]
                 is_out = bool(np.asarray(pred == -1).item())
                 risk_score = int(round(float(risk_arr[i])))
+                anomaly_flag = is_out and risk_score >= 50
+                mkey = merchant_key_for_row(row)
+                count_90d = int(merchant_counts.get(mkey, 0))
+                risk_score, anomaly_flag = apply_merchant_trust_rule(
+                    risk_score, anomaly_flag, count_90d=count_90d
+                )
                 risk_level = self.get_risk_level(risk_score)
-                reason = self.get_anomaly_reason(row, user_id) if is_out else None
+                reason = (
+                    self.get_anomaly_reason(row, user_id) if anomaly_flag else None
+                )
 
                 cursor.execute(
                     """
@@ -323,13 +378,13 @@ class EnhancedIsolationForest:
                         ml_processed = TRUE
                     WHERE id = %s
                     """,
-                    (is_out, risk_score, risk_level, reason, int(row["id"])),
+                    (anomaly_flag, risk_score, risk_level, reason, int(row["id"])),
                 )
 
-                if is_out:
+                if anomaly_flag:
                     anomalies_found += 1
 
-                if is_out and risk_level in ("HIGH", "CRITICAL"):
+                if anomaly_flag and risk_level in ("HIGH", "CRITICAL"):
                     high_risk += 1
                     tid = int(row["id"])
                     cursor.execute(
@@ -440,6 +495,8 @@ class EnhancedIsolationForest:
             "type": str(txn.get("type") or "DEBIT"),
             "category": txn.get("category") or "Others",
             "merchant": txn.get("merchant") or txn.get("payee") or "",
+            "normalized_merchant": txn.get("normalized_merchant")
+            or merchant_prefix_key(str(txn.get("merchant") or txn.get("payee") or "")),
             "hour_of_day": int(hour) if hour is not None else 12,
             "day_of_week": int(txn.get("day_of_week") or 3),
             "is_weekend": txn.get("is_weekend", False),
@@ -448,11 +505,27 @@ class EnhancedIsolationForest:
             "payment_method": txn.get("payment_method") or "UPI",
         }
         df = pd.DataFrame([row])
+        conn = self.get_db_connection()
+        cur = conn.cursor()
         try:
-            feat_mat = self.engineer_features(df, uid)
+            mkey = merchant_key_for_row(row)
+            mcounts = fetch_merchant_debit_counts_90d(cur, uid, [mkey])
+        finally:
+            cur.close()
+            conn.close()
+        try:
+            feat_mat = self.engineer_features(df, uid, merchant_counts=mcounts)
             scaled = self.scalers[uid].transform(feat_mat)
+            pred = int(self.models[uid].predict(scaled)[0])
             raw = float(self.models[uid].score_samples(scaled)[0])
             risk_score = int(round(float(self._risk_scores_from_samples(np.array([raw]))[0])))
+            is_out = pred == -1
+            anomaly_flag = is_out and risk_score >= 50
+            risk_score, anomaly_flag = apply_merchant_trust_rule(
+                risk_score,
+                anomaly_flag,
+                count_90d=int(mcounts.get(mkey, 0)),
+            )
         except Exception as exc:  # noqa: BLE001
             ms = (time.perf_counter() - t0) * 1000
             return ScoreResult.cold_start(

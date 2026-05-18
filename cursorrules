@@ -1,0 +1,497 @@
+# ============================================================
+# SMARTSPEND .cursorrules — READ THIS BEFORE EVERY SINGLE CHANGE
+# ============================================================
+# If you skip these rules, the app WILL break for other users.
+# These rules apply to EVERY file, EVERY function, EVERY query.
+# ============================================================
+
+
+# ================================================================
+# RULE 0 — THE GOLDEN RULE (Most Important)
+# ================================================================
+# EVERY change must work for:
+#   - user_id = 1  (brand new signup, 0 transactions)
+#   - user_id = 19 (Vikram Singh, test user)
+#   - user_id = 999 (future user not yet created)
+#   - ANY user in the database
+#
+# If your fix only works for user 19, it is NOT a fix. It is a bug.
+# Before committing any backend change, mentally substitute user_id
+# with a random number. If the logic breaks → rewrite it.
+
+
+# ================================================================
+# RULE 1 — NO HARDCODED USER/SOURCE/INSTITUTION VALUES
+# ================================================================
+
+## NEVER do this:
+#   user_id = 19
+#   source_id = 64
+#   WHERE user_id = 19
+#   institution = "Axisb"
+#   name = "Vikram Singh"
+#   amount = 21173
+
+## ALWAYS do this:
+#   user_id = {user_id}          # from URL param or auth token
+#   source_id = {source_id}      # from DB query for that user
+#   WHERE user_id = :user_id     # parameterized query
+
+## Allowed exceptions (only these):
+#   - /seed_data/ or /demo_data/ scripts         → OK
+#   - /tests/ or test_*.py files                 → OK
+#   - comments/docstrings explaining an example  → OK
+
+## Grep to run before every commit:
+#   grep -rn "user_id.*=.*19\|source_id.*64\|Vikram\|vikram" backend/ --include="*.py"
+#   If any match found outside seed/test → FIX BEFORE COMMITTING
+
+
+# ================================================================
+# RULE 2 — ALL ROUTE HANDLERS: user_id FROM URL OR AUTH ONLY
+# ================================================================
+
+## CORRECT patterns:
+#   @router.get("/{user_id}/dashboard")
+#   async def get_dashboard(user_id: int, ...):
+#
+#   @router.get("/me/dashboard")
+#   async def get_dashboard(current_user = Depends(get_current_user)):
+#       user_id = current_user.id
+
+## WRONG patterns:
+#   user_id = 19  # ← NEVER
+#   user_id = int(os.getenv("DEFAULT_USER", 19))  # ← NEVER
+#   if not user_id: user_id = 19  # ← NEVER
+
+## Every new route checklist:
+#   [ ] user_id comes from URL path param OR auth token
+#   [ ] No fallback to a hardcoded default user
+#   [ ] Query filters by this user_id
+#   [ ] Response contains only this user's data
+
+
+# ================================================================
+# RULE 3 — SWITCH VIEW (CRITICAL — THIS BREAKS THE MOST)
+# ================================================================
+# When user clicks "Switch View" (bank_only / card_only / merged),
+# EVERY module must refetch with the new scope. No exceptions.
+
+## The 7 modules that MUST update on view switch:
+#   1. Dashboard        → summary cards, charts, category breakdown
+#   2. Transactions     → full transaction list + filters
+#   3. FraudShield      → alerts + risk scores
+#   4. Dark Patterns    → detected patterns + amounts
+#   5. EMI Tracker      → active EMIs + projections
+#   6. AI Insight       → chatbot context + health score
+#   7. Festival Planner → budget calculations (uses EMI data)
+#   8. Purchase Planner → affordability checks (uses EMI + balance)
+
+## Backend rule:
+#   EVERY data endpoint must call transaction_scope_sql(user_id, mode)
+#   or fetch_dashboard_mode(user_id) — NEVER query transactions directly
+#   without applying the scope filter first.
+
+## Frontend rule:
+#   viewMode must be stored in a GLOBAL state (Redux / Context / Zustand)
+#   NOT in a single component's local state.
+#   When viewMode changes:
+#     - dispatch global action: SET_VIEW_MODE(newMode)
+#     - ALL components that consume transaction data must have
+#       useEffect([viewMode]) → refetch their data
+#     - Show loading spinner during refetch
+#     - Never show stale data from previous mode
+
+## Switch View implementation pattern:
+#
+#   // GlobalContext or Redux store
+#   const { viewMode, setViewMode } = useViewMode();
+#
+#   // In every data-fetching component:
+#   useEffect(() => {
+#     fetchData(userId, viewMode);  // viewMode as dependency
+#   }, [userId, viewMode]);         // refetch when mode changes
+#
+#   // API calls must include mode:
+#   GET /api/{user_id}/dashboard?mode={viewMode}
+#   GET /api/{user_id}/transactions?mode={viewMode}
+#   GET /api/{user_id}/fraud?mode={viewMode}
+#   GET /api/{user_id}/dark-patterns?mode={viewMode}
+#   GET /api/{user_id}/emi?mode={viewMode}
+#   POST /api/{user_id}/ai-insight/chat  body: { mode: viewMode, ... }
+
+## NEVER do this:
+#   - Cache response for one mode and show it in another mode
+#   - Only update Dashboard on view switch and leave rest unchanged
+#   - Use viewMode from localStorage without syncing to React state
+
+
+# ================================================================
+# RULE 4 — EMI ↔ FESTIVAL PLANNER ↔ PURCHASE PLANNER LINKING
+# ================================================================
+# These three modules share financial state. A change in one MUST
+# reflect in the others — especially for NEW USERS with 0 EMIs.
+
+## Data flow (must be live, not cached):
+#
+#   EMI Tracker
+#     └─► provides: monthly_emi_total, active_emi_count, emi_list[]
+#           ↓
+#   Festival Planner
+#     └─► uses: monthly_emi_total to calculate "safe festival budget"
+#     └─► formula: festival_budget = monthly_income - monthly_emi_total
+#                                   - essential_expenses - safety_buffer
+#           ↓
+#   Purchase Planner
+#     └─► uses: monthly_emi_total + proposed_new_emi
+#     └─► formula: affordability = (monthly_income - current_emis
+#                                  - new_emi) > min_buffer
+#     └─► shows: "₹X remaining after all EMIs"
+
+## New user (0 EMIs) handling:
+#   - monthly_emi_total = 0  (not null, not error)
+#   - Festival Planner: show full budget without EMI deduction
+#   - Purchase Planner: no existing EMI burden, show clean state
+#   - Never crash or show NaN/undefined when emi_list is empty
+
+## When Purchase Planner adds a planned purchase (new EMI):
+#   - Festival Planner MUST show updated remaining budget
+#   - EMI Tracker MUST show projected new EMI in "upcoming" section
+#   - This is a frontend state update (not DB write until confirmed)
+
+## When Festival Planner sets a festival budget:
+#   - Purchase Planner must factor this reserved amount
+#   - Show: "₹Y reserved for [festival], ₹Z available for purchase"
+
+## API contract:
+#   GET /api/{user_id}/financial-summary?mode={viewMode}
+#   Response: {
+#     monthly_income: number,
+#     monthly_emi_total: number,      # 0 for new users, never null
+#     active_emis: EMI[],             # [] for new users, never null
+#     available_balance: number,
+#     reserved_festival_budget: number,
+#     projected_emis: EMI[]           # from Purchase Planner
+#   }
+
+
+# ================================================================
+# RULE 5 — AI INSIGHT CHATBOT: USERNAME + BANK VALIDATION
+# ================================================================
+# The chatbot must know WHO the user is and WHICH documents are theirs.
+# This is the #1 reported UX bug. Follow this logic strictly.
+
+## Step 1: Always fetch user identity on chatbot init
+#   GET /api/{user_id}/profile → { full_name, linked_accounts[] }
+#   Store: currentUser = { name, linkedBankNames[], linkedCardNames[] }
+
+## Step 2: When user uploads a document for analysis
+#   - Extract institution name from document header/metadata
+#   - Compare with currentUser.linkedBankNames + linkedCardNames
+
+## Step 3: Document validation logic (IMPLEMENT THIS EXACTLY)
+#
+#   function validateUploadedDoc(docInstitution, currentUser):
+#
+#     CASE A — Doc institution matches a linked account:
+#       → Full analysis mode
+#       → "Here's your [BankName] statement analysis, [UserName]:"
+#       → Show all features (spending breakdown, anomalies, etc.)
+#       → Show feature buttons for deep-dive questions
+#
+#     CASE B — Doc institution does NOT match any linked account
+#               but username/account number matches:
+#       → Partial analysis mode
+#       → Message: "[UserName], this looks like your [DocBank] statement,
+#                   but [DocBank] isn't linked to your SmartSpend account.
+#                   Here's a quick overview of this statement: [brief insight]
+#                   💡 Tip: Link your [DocBank] account to unlock full
+#                   analysis, fraud detection, and spending patterns."
+#       → Show: Link Account button
+#       → Do NOT show full feature buttons (limited mode)
+#
+#     CASE C — Doc institution doesn't match AND different person's name:
+#       → Reject mode
+#       → Message: "Hey [CurrentUserName], this statement appears to belong
+#                   to a different person. I can't analyze someone else's
+#                   financial data for privacy reasons.
+#                   If this is your account under a different name, please
+#                   link it in Settings → Connected Accounts."
+#       → Show: Go to Settings button
+#       → Do NOT analyze the document
+
+## Step 4: Feature buttons after valid doc analysis
+#   When user asks about their OWN linked document:
+#   - Never lose context of which document was analyzed
+#   - Show persistent feature buttons: [Where I Spend Most] [Top Categories]
+#     [Unusual Transactions] [Monthly Trend] [Savings Tips]
+#   - Clicking feature button = pre-filled query with doc context
+#   - Document context must persist for entire chat session
+
+## Step 5: Chatbot must use current viewMode
+#   - If viewMode = bank_only → analyze only bank transactions
+#   - If viewMode = card_only → analyze only card transactions
+#   - If viewMode = merged    → analyze combined view
+#   - Include viewMode in every AI Insight API call
+
+
+# ================================================================
+# RULE 6 — HEALTH SCORE: MUST BE REAL AND DYNAMIC
+# ================================================================
+
+## Health Score components (all must be real data, no fakes):
+#   1. Spending Consistency   → stddev of monthly spend (last 6 months)
+#   2. Savings Rate           → (income - expense) / income × 100
+#   3. EMI Burden             → monthly_emi / monthly_income × 100
+#   4. Fraud Risk             → weighted avg of fraud scores (last 30 days)
+#   5. Dark Pattern Exposure  → count of dark patterns detected (last 30 days)
+#   6. Category Diversity     → number of distinct spending categories
+
+## Calculation rules:
+#   - New user with 0 transactions → Health Score = null
+#     Show: "Complete your first month to get your Health Score"
+#     Do NOT show: 0/100 or fake score or "--"
+#   - User with < 30 days data → partial score with disclaimer
+#     Show: "Based on [N] days of data (score updates monthly)"
+#   - User with 30+ days → full score, update weekly
+
+## NEVER do this:
+#   - Return hardcoded score (e.g., always 72)
+#   - Show previous user's score to new user
+#   - Calculate score without filtering by user_id AND viewMode
+#   - Show score as "loading..." permanently if calculation fails
+#     → Show error state with retry button instead
+
+
+# ================================================================
+# RULE 7 — EMPTY STATE HANDLING (NEW USER / ZERO DATA)
+# ================================================================
+# A new user must see clean empty states, NEVER crashes or NaN.
+
+## Per module empty state:
+#
+#   Dashboard:
+#     0 transactions → "Upload your first bank statement to get started"
+#     Show upload button, not empty charts
+#
+#   Transactions:
+#     [] → "No transactions yet. Upload a statement to begin."
+#     Never show: undefined, NaN, blank white screen
+#
+#   FraudShield:
+#     [] alerts → "No suspicious activity detected 🎉"
+#     ML model untrained → "Fraud detection activates after first upload"
+#     Never show: fake alerts, demo alerts, error boundary crash
+#
+#   Dark Patterns:
+#     [] → "No dark patterns detected in your transactions"
+#     Never show: patterns from another user
+#
+#   EMI Tracker:
+#     [] → "No EMIs detected yet"
+#     monthly_emi_total = 0  (not null, not undefined)
+#     Never crash Festival/Purchase Planner because of null EMI data
+#
+#   AI Insight:
+#     No linked account → "Link an account or upload a statement to start"
+#     Show: Upload button + Link Account button
+#
+#   Health Score:
+#     < 30 days data → partial score with disclaimer
+#     0 days → "Check back after your first month"
+
+## Code pattern for empty state:
+#   const total = data?.monthly_emi_total ?? 0;  # use nullish coalescing
+#   const list  = data?.transactions ?? [];       # default to empty array
+#   const score = data?.health_score ?? null;     # null = not computed yet
+
+
+# ================================================================
+# RULE 8 — ML MODELS ARE ALWAYS PER-USER
+# ================================================================
+
+## IsolationForest and all ML models:
+#   - ALWAYS keyed by user_id: models[user_id]
+#   - NEVER train on all users combined
+#   - NEVER score user A with user B's model
+#   - Retrain triggers for the SPECIFIC user who uploaded
+
+## Model lifecycle:
+#   Upload → parse → store transactions →
+#   auto_score(user_id) → auto_train(user_id) →
+#   emit WebSocket event to user_id's channel only
+
+## Missing model fallback:
+#   if user_id not in models:
+#     → use rule-based fallback scorer
+#     → return score with flag: { score: X, method: "rules", ml_ready: false }
+#   NEVER return another user's model scores
+#   NEVER crash with KeyError
+
+
+# ================================================================
+# RULE 9 — DATABASE QUERIES: ALWAYS FILTER BY user_id
+# ================================================================
+
+## Every SELECT must have WHERE user_id = :user_id
+## Every INSERT must include user_id column
+## Every UPDATE must have WHERE user_id = :user_id AND id = :record_id
+## Every DELETE must have WHERE user_id = :user_id AND id = :record_id
+
+## Forbidden patterns:
+#   SELECT * FROM transactions                    # ← missing user filter
+#   SELECT * FROM transactions WHERE amount > 100 # ← missing user filter
+#   UPDATE transactions SET category = 'food'     # ← updates ALL users!
+
+## Required pattern:
+#   SELECT * FROM transactions
+#   WHERE user_id = :user_id
+#   AND {scope_filter}               # bank_only / card_only / merged
+#   ORDER BY date DESC
+
+## Scope filter helper (use this everywhere):
+#   def transaction_scope_sql(user_id: int, mode: str) -> str:
+#     if mode == "bank_only":
+#       return "AND source_type = 'bank'"
+#     elif mode == "card_only":
+#       return "AND source_type = 'credit_card'"
+#     else:  # merged
+#       return ""  # no additional filter
+
+
+# ================================================================
+# RULE 10 — WEBSOCKET EVENTS: SEND TO CORRECT USER CHANNEL
+# ================================================================
+
+## NEVER broadcast to all users
+## ALWAYS emit to room/channel = f"user_{user_id}"
+
+## Correct:
+#   socketio.emit("upload_complete", data, room=f"user_{user_id}")
+#   socketio.emit("fraud_alert", alert, room=f"user_{user_id}")
+
+## Wrong:
+#   socketio.emit("upload_complete", data)  # broadcasts to everyone!
+#   socketio.emit("fraud_alert", alert, room="all_users")
+
+
+# ================================================================
+# RULE 11 — FRONTEND GLOBAL STATE REQUIREMENTS
+# ================================================================
+
+## These values MUST be in global state (not local component state):
+#   - userId         (current logged-in user)
+#   - viewMode       (bank_only / card_only / merged)
+#   - linkedAccounts (list of connected banks/cards)
+#   - userProfile    (name, email, avatar)
+
+## These cause bugs when in local state:
+#   - viewMode in Dashboard component only → other modules don't update
+#   - linkedAccounts in Settings only → chatbot doesn't know about them
+
+## When user logs in:
+#   1. Fetch and store: userId, userProfile, linkedAccounts, viewMode
+#   2. All modules read from global store
+#   3. viewMode persists to localStorage (remember user's preference)
+
+## When user logs out:
+#   1. Clear ALL global state
+#   2. Clear localStorage (no data leaking to next user on same device)
+#   3. Redirect to login
+
+
+# ================================================================
+# RULE 12 — SIGN UP → FIRST EXPERIENCE FLOW
+# ================================================================
+
+## New user journey (must work perfectly):
+#   Sign Up → Email Verify → Onboarding → Dashboard (empty state)
+#     └─► "Welcome [Name]! Upload your first statement or link an account"
+#
+#   No crashes, no NaN, no "undefined" text anywhere
+#   viewMode defaults to "merged" for new users
+#   Health Score shows "Not enough data yet"
+#   All modules show their empty state (not error state)
+
+## Returning user journey:
+#   Login → Dashboard with THEIR data in THEIR last viewMode
+#   If viewMode was "bank_only" when they logged out → restore "bank_only"
+#   All modules load their own data (not another user's data)
+
+
+# ================================================================
+# RULE 13 — TESTING CHECKLIST (Run Before Every PR)
+# ================================================================
+
+## Must test with ALL of these scenarios:
+
+#   USER TYPES:
+#   [ ] New user (0 transactions, 0 linked accounts)
+#   [ ] User with 1 linked bank only
+#   [ ] User with 1 linked card only
+#   [ ] User with multiple accounts (bank + card)
+#   [ ] User 19 (Vikram Singh) — existing test user still works
+
+#   VIEW MODES (test each module in each mode):
+#   [ ] bank_only  → Dashboard, Transactions, Fraud, Dark, EMI, AI Insight
+#   [ ] card_only  → same modules
+#   [ ] merged     → same modules
+#   [ ] Switch from bank_only → card_only → all 7 modules update
+
+#   EDGE CASES:
+#   [ ] Upload while in bank_only mode → data appears correctly
+#   [ ] Switch view during upload → no crash, correct mode after
+#   [ ] Chatbot with unlinked bank doc → shows CASE B message
+#   [ ] Chatbot with someone else's doc → shows CASE C message
+#   [ ] EMI = 0 → Festival and Purchase Planner don't crash
+#   [ ] Health Score with 0 transactions → shows "not enough data"
+
+#   PERFORMANCE:
+#   [ ] 1000+ transactions → no timeout, pagination works
+#   [ ] Multiple rapid view switches → no race condition / stale data
+
+
+# ================================================================
+# RULE 14 — ERROR MESSAGES: USER-FRIENDLY ONLY
+# ================================================================
+
+## NEVER show to user:
+#   - Stack traces
+#   - SQL error messages
+#   - "KeyError: 'user_id'"
+#   - "NoneType has no attribute..."
+#   - Raw exception text
+
+## ALWAYS show:
+#   - "Something went wrong. Please try again." + retry button
+#   - "Your data is loading..." (with timeout fallback)
+#   - "No data available for this view" (not crash)
+
+## Backend: wrap every route in try/except
+#   return JSONResponse({"error": "user_friendly_message"}, status_code=400)
+
+## Frontend: every fetch in try/catch
+#   catch(e) { setError("Could not load data. Tap to retry.") }
+
+
+# ================================================================
+# RULE 15 — NO DEMO/FAKE DATA IN PRODUCTION FEATURES
+# ================================================================
+
+## NEVER:
+#   - Show hardcoded transaction amounts as real data
+#   - Show "₹21,173" or any specific amount that isn't from the DB
+#   - Fake a health score of 72 when ML hasn't computed it
+#   - Show demo fraud alerts as if real
+
+## ALWAYS:
+#   - If feature not ready → "Coming soon" or honest empty state
+#   - If ML model not trained → "Training in progress"
+#   - If no data → clean empty state with call-to-action
+
+# ================================================================
+# END OF CURSORRULES
+# Last updated: 2025 | SmartSpend Project
+# Any change to the codebase must comply with ALL rules above.
+# When in doubt: ask "does this work for a brand new user?" first.
+# ================================================================

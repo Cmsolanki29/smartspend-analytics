@@ -19,6 +19,7 @@ import {
 import useSmartSpend from "../../hooks/useSmartSpend";
 import { humanizeVerdictReason } from "../../utils/subscriptionVerdictCopy";
 import { useAuth } from "../../context/AuthContext";
+import { useViewMode } from "../../context/ViewModeContext";
 import {
   apiUtils,
   getDarkPatterns,
@@ -54,13 +55,15 @@ type BreakdownData = {
 };
 
 function SourceBreakdownCard({ userId }: { userId: number }) {
+  const { viewMode } = useViewMode();
   const [breakdown, setBreakdown] = useState<BreakdownData | null>(null);
   const [loadingBd, setLoadingBd] = useState(true);
 
   const fetchBreakdown = useCallback(async () => {
     setLoadingBd(true);
     try {
-      const res = await fetch(`/api/dashboard/source-breakdown?user_id=${userId}`);
+      const qs = new URLSearchParams({ user_id: String(userId), scope: viewMode });
+      const res = await fetch(`/api/dashboard/source-breakdown?${qs}`);
       if (!res.ok) return;
       const data: BreakdownData = await res.json();
       setBreakdown(data);
@@ -69,13 +72,10 @@ function SourceBreakdownCard({ userId }: { userId: number }) {
     } finally {
       setLoadingBd(false);
     }
-  }, [userId]);
+  }, [userId, viewMode]);
 
   useEffect(() => {
     fetchBreakdown();
-    const handler = () => fetchBreakdown();
-    window.addEventListener("dashboardModeChanged", handler);
-    return () => window.removeEventListener("dashboardModeChanged", handler);
   }, [fetchBreakdown]);
 
   if (loadingBd || !breakdown || breakdown.sources.length === 0) return null;
@@ -169,6 +169,7 @@ export default function Dashboard({
 }: DashboardProps) {
   const reduce = useReducedMotion();
   const { user: authUser } = useAuth();
+  const { viewMode } = useViewMode();
   const { spending, trends, health, loading, error, loadWarnings, refetch } = useSmartSpend(
     userId,
     month,
@@ -254,6 +255,7 @@ export default function Dashboard({
   useEffect(() => {
     const handler = () => {
       loadIntel();
+      refetch();
       getDashboardSummary(userId)
         .then((dash: { statement_period_spend?: number }) => {
           const sp = Number(dash?.statement_period_spend ?? 0);
@@ -262,8 +264,12 @@ export default function Dashboard({
         .catch(() => setStatementSpend(null));
     };
     window.addEventListener("dashboardModeChanged", handler);
-    return () => window.removeEventListener("dashboardModeChanged", handler);
-  }, [loadIntel, userId]);
+    window.addEventListener("smartspend:data-updated", handler);
+    return () => {
+      window.removeEventListener("dashboardModeChanged", handler);
+      window.removeEventListener("smartspend:data-updated", handler);
+    };
+  }, [loadIntel, userId, refetch]);
 
   // Refresh health score + KPIs when EMI/purchase/festival data changes
   useEffect(() => {
@@ -333,13 +339,13 @@ export default function Dashboard({
   }, [trendList, month, year]);
 
   const monthSpend = useMemo(() => {
-    if (authUser?.dashboard_mode === "credit_card_only" && statementSpend != null) {
+    if (viewMode === "credit_card_only" && statementSpend != null) {
       return statementSpend;
     }
     const fromTrend = Number(trendRow?.expense || 0);
     if (fromTrend > 0) return fromTrend;
     return (Array.isArray(spending) ? spending : []).reduce((acc: number, row: { total_amount?: number }) => acc + Number(row.total_amount || 0), 0);
-  }, [trendRow, spending, authUser?.dashboard_mode, statementSpend]);
+  }, [trendRow, spending, viewMode, statementSpend]);
 
   const monthIncome = useMemo(() => Number(trendRow?.income || 0), [trendRow]);
 
@@ -558,16 +564,20 @@ export default function Dashboard({
       animate={{ opacity: 1 }}
       transition={{ duration: reduce ? 0.15 : 0.4, ease: [0.22, 1, 0.36, 1] }}
     >
-      {Array.isArray(loadWarnings) && loadWarnings.length > 0 ? (
+      {Array.isArray(loadWarnings) &&
+      loadWarnings.length > 0 &&
+      !trendList.length &&
+      !(Array.isArray(spending) && spending.length > 0) ? (
         <div
           role="status"
           className="mb-4 rounded-xl border border-amber-400/25 bg-amber-500/10 px-4 py-2.5 text-sm text-amber-50/95"
         >
-          <span className="font-semibold text-amber-100">Partial data: </span>
-          {loadWarnings.join(" · ")}
+          <span className="font-semibold text-amber-100">Charts still loading — </span>
+          Data will appear shortly. If this persists, run{" "}
+          <code className="rounded bg-black/30 px-1 text-xs">.\start-dev.ps1</code> and refresh.
         </div>
       ) : null}
-      {canLiveIntel && authUser?.dashboard_mode === "credit_card_only" ? (
+      {canLiveIntel && viewMode === "credit_card_only" ? (
         <div
           role="status"
           className="mb-4 flex flex-col gap-3 rounded-xl border border-amber-400/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-50 sm:flex-row sm:items-center sm:justify-between"
@@ -621,11 +631,11 @@ export default function Dashboard({
             />
             <KPICard
               variant="rose"
-              label={authUser?.dashboard_mode === "credit_card_only" ? "Card Statement Spend" : "This Month Spend"}
+              label={viewMode === "credit_card_only" ? "Card Statement Spend" : "This Month Spend"}
               value={monthSpend}
               formatValue={(n) => apiUtils.formatINR(n)}
               subtitle={
-                authUser?.dashboard_mode === "credit_card_only"
+                viewMode === "credit_card_only"
                   ? "Total on uploaded card statement(s)"
                   : `${month}/${year}`
               }

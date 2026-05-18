@@ -203,12 +203,10 @@ def normalize_category(raw: str | None) -> str:
 
 
 def resolve_category(merchant: str, raw_category: str | None = None) -> str:
-    """Best category for a row: normalize stored value, else infer from merchant."""
-    if raw_category and str(raw_category).strip():
-        normalized = normalize_category(raw_category)
-        if normalized != "Other":
-            return normalized
-    return normalize_category(categorize_merchant(merchant))
+    """Best category for a row: global enrich map, then legacy aliases."""
+    from services.parser_utils import stored_category_for_merchant
+
+    return stored_category_for_merchant(merchant, raw_category)
 
 
 def category_filter_sql(bucket: str, alias: str = "t") -> tuple[str, list]:

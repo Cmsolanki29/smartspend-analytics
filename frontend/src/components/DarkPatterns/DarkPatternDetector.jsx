@@ -1,4 +1,5 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { useViewMode } from "../../context/ViewModeContext";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   AlertTriangle,
@@ -101,6 +102,7 @@ function severityChipClass(sev) {
 }
 
 const DarkPatternDetector = ({ userId }) => {
+  const { viewMode } = useViewMode();
   const { showToast } = useToast();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -114,11 +116,14 @@ const DarkPatternDetector = ({ userId }) => {
   const [proactiveLoading, setProactiveLoading] = useState(false);
   const [proactiveBusy, setProactiveBusy] = useState(false);
 
-  const load = async () => {
+  const load = useCallback(async () => {
     setLoading(true);
     setError("");
     try {
-      const [patterns, rupee] = await Promise.all([getDarkPatterns(userId), getRupeeTraps(userId)]);
+      const [patterns, rupee] = await Promise.all([
+        getDarkPatterns(userId, viewMode),
+        getRupeeTraps(userId, viewMode),
+      ]);
       setPatternsData(patterns);
       setRupeeData(rupee);
     } catch (err) {
@@ -126,7 +131,7 @@ const DarkPatternDetector = ({ userId }) => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [userId, viewMode]);
 
   const loadProactive = async () => {
     if (!userId) return;
@@ -162,16 +167,10 @@ const DarkPatternDetector = ({ userId }) => {
 
   useEffect(() => {
     load();
-  }, [userId]);
+  }, [load]);
 
   useEffect(() => {
     loadProactive();
-  }, [userId]);
-
-  useEffect(() => {
-    const handler = () => { load(); loadProactive(); };
-    window.addEventListener("dashboardModeChanged", handler);
-    return () => window.removeEventListener("dashboardModeChanged", handler);
   }, [userId]);
 
   const strongestTrap = useMemo(() => {
@@ -913,7 +912,7 @@ const DarkPatternDetector = ({ userId }) => {
           <EmptyState
             icon="🎉"
             title="No suspicious charges detected"
-            subtitle="We did not find dark-pattern billing signals in your recent data. Stay alert on free trials and renewals."
+            subtitle="No dark patterns detected in your transactions."
           />
         </div>
       )}

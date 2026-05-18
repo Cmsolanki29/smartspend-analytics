@@ -167,6 +167,7 @@ const TopBar = ({
             <UserMenu
               userName={displayName}
               userEmail={userEmail}
+              userId={userId}
               onTabChange={onTabChange}
               onLogout={onLogout}
             />

@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from db import get_db
 from models.schemas import AnomalyResponse
-from services.dashboard_scope import fetch_dashboard_mode, transaction_scope_sql
+from services.dashboard_scope import resolve_scope_mode, transaction_scope_sql
 from services.ml_model import ml_detector
 from services.pattern_analyzer import pattern_analyzer
 
@@ -76,17 +76,24 @@ def get_and_mark_alerts_read(user_id: int, conn=Depends(get_db)):
 
 
 @router.get("/{user_id}/stats")
-def anomaly_stats_enhanced(user_id: int, conn=Depends(get_db)):
+def anomaly_stats_enhanced(
+    user_id: int,
+    scope: Optional[str] = Query(
+        None,
+        description="bank_only | credit_card_only | merged",
+    ),
+    conn=Depends(get_db),
+):
     cur = conn.cursor()
     try:
-        mode = fetch_dashboard_mode(cur, user_id)
-        scope = transaction_scope_sql("t", mode)
+        mode = resolve_scope_mode(cur, user_id, scope)
+        scope_sql = transaction_scope_sql("t", mode)
         cur.execute(
             f"""
             SELECT COALESCE(t.anomaly_reason, 'UNKNOWN'), t.risk_level, t.risk_score, t.merchant, t.amount
             FROM transactions t
             WHERE t.user_id = %s AND t.anomaly_flag = TRUE
-              AND ({scope});
+              AND ({scope_sql});
             """,
             (user_id,),
         )
@@ -167,20 +174,24 @@ def list_anomalies(
         None, description="Optional filter: LOW, MEDIUM, HIGH, or CRITICAL"
     ),
     limit: int = Query(20, ge=1, le=200),
+    scope: Optional[str] = Query(
+        None,
+        description="bank_only | credit_card_only | merged",
+    ),
     conn=Depends(get_db),
 ):
     if severity and severity.upper() not in ("LOW", "MEDIUM", "HIGH", "CRITICAL"):
         raise HTTPException(400, "severity must be LOW, MEDIUM, HIGH, or CRITICAL")
     cur = conn.cursor()
     try:
-        mode = fetch_dashboard_mode(cur, user_id)
-        scope = transaction_scope_sql("t", mode)
+        mode = resolve_scope_mode(cur, user_id, scope)
+        scope_sql = transaction_scope_sql("t", mode)
         q = f"""
             SELECT t.id, t.merchant, t.amount, t.transaction_date, COALESCE(t.anomaly_reason, ''),
                    t.risk_score, t.risk_level
             FROM transactions t
             WHERE t.user_id = %s AND t.anomaly_flag = TRUE
-              AND ({scope})
+              AND ({scope_sql})
         """
         params: list[Any] = [user_id]
         if severity:

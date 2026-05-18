@@ -16,11 +16,13 @@ import {
   ExternalLink,
   Phone,
 } from "lucide-react";
+import { useViewMode } from "../../context/ViewModeContext";
 import {
   getFraudShieldAlerts,
   postFraudShieldAlertAction,
   postFraudShieldAlertActionByTransaction,
 } from "../../services/api";
+import { fraudAlertDisplayLabel, fraudSeverityFromScore } from "../../utils/fraudLabels";
 import {
   getEnrichedReviewQueue,
   getInvestigation,
@@ -45,10 +47,8 @@ const SEVERITY_COLORS = {
 
 function severityLabelFromScore(score) {
   const s = Number(score) || 0;
-  if (s >= 85) return "CRITICAL";
-  if (s >= 60) return "HIGH";
-  if (s >= 30) return "MEDIUM";
-  return "LOW";
+  if (s < 50) return "LOW";
+  return fraudSeverityFromScore(s);
 }
 
 function getSeverityKey(row) {
@@ -91,6 +91,7 @@ function buildUnifiedRows(alerts, queueItems) {
       riskScore: Number(a.risk_score ?? q?.score ?? 0),
       severity,
       pattern: a.pattern_matched || q?.anomaly_reason || "",
+      alertType: a.alert_type || (a.source === "transaction" ? "ML_ANOMALY" : ""),
       hinglish: a.hinglish_explanation || "",
       userAction: String(a.user_action || "PENDING").toUpperCase(),
       paymentMethod: q?.payment_method || null,
@@ -161,6 +162,7 @@ function isDemoTxnId(id) {
 }
 
 const UnifiedFraudAlerts = ({ userId, onAlertsChanged }) => {
+  const { viewMode } = useViewMode();
   const { showToast } = useToast();
   const { data: realStats } = useFeedbackStats();
   const [rows, setRows] = useState([]);
@@ -176,11 +178,13 @@ const UnifiedFraudAlerts = ({ userId, onAlertsChanged }) => {
     setError("");
     try {
       const [alRes, qRes] = await Promise.all([
-        getFraudShieldAlerts(userId),
+        getFraudShieldAlerts(userId, viewMode),
         getEnrichedReviewQueue("all", 100, userId).catch(() => ({ items: [] })),
       ]);
-      const alerts = alRes?.alerts || [];
-      const queueItems = qRes?.items ?? (Array.isArray(qRes) ? qRes : []);
+      const alerts = (alRes?.alerts || []).filter((a) => Number(a.risk_score || 0) >= 50);
+      const queueItems = (qRes?.items ?? (Array.isArray(qRes) ? qRes : [])).filter(
+        (q) => Number(q.score || q.risk_score || 0) >= 50
+      );
       setRows(buildUnifiedRows(alerts, queueItems));
     } catch (e) {
       setError(e.message || "Failed to load alerts");
@@ -188,10 +192,20 @@ const UnifiedFraudAlerts = ({ userId, onAlertsChanged }) => {
     } finally {
       setLoading(false);
     }
-  }, [userId]);
+  }, [userId, viewMode]);
 
   useEffect(() => {
     load();
+  }, [load]);
+
+  useEffect(() => {
+    const handler = () => load();
+    window.addEventListener("smartspend:data-updated", handler);
+    window.addEventListener("dashboardModeChanged", handler);
+    return () => {
+      window.removeEventListener("smartspend:data-updated", handler);
+      window.removeEventListener("dashboardModeChanged", handler);
+    };
   }, [load]);
 
   const txnIdsForInv = useMemo(
@@ -500,7 +514,7 @@ const UnifiedFraudAlerts = ({ userId, onAlertsChanged }) => {
                           <span
                             className={`text-[10px] px-2 py-0.5 rounded-full font-bold border shrink-0 ${colors.bg} ${colors.text} ${colors.border}`}
                           >
-                            {sev}
+                            {fraudAlertDisplayLabel(row.alertType || row.pattern, row.riskScore)}
                           </span>
                           <span className="text-[10px] text-white/40 uppercase tracking-wide shrink-0">
                             {row.sourceLabel}

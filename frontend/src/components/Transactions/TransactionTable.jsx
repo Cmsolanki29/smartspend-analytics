@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Download, FileText } from "lucide-react";
+import { useViewMode } from "../../context/ViewModeContext";
 import { apiUtils, getTransactions } from "../../services/api";
 import { EmptyState } from "../common/EmptyState";
 import { ErrorCard } from "../common/ErrorCard";
@@ -12,6 +13,7 @@ const categories = ["All", "Food & Dining", "Entertainment", "Shopping", "Travel
 const csvEscape = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
 
 const TransactionTable = ({ userId, month, year, presentation = "default" }) => {
+  const { viewMode } = useViewMode();
   const dash = presentation === "dashboard";
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -20,14 +22,6 @@ const TransactionTable = ({ userId, month, year, presentation = "default" }) => 
   const [category, setCategory] = useState("All");
   const [sortBy, setSortBy] = useState("date");
   const [page, setPage] = useState(1);
-  // Bumped whenever dashboard mode changes so transactions re-fetch with new scope.
-  const [modeVersion, setModeVersion] = useState(0);
-
-  useEffect(() => {
-    const handler = () => setModeVersion((v) => v + 1);
-    window.addEventListener("dashboardModeChanged", handler);
-    return () => window.removeEventListener("dashboardModeChanged", handler);
-  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -35,21 +29,24 @@ const TransactionTable = ({ userId, month, year, presentation = "default" }) => 
     try {
       const anomalyOnly = category === "Anomalies Only" ? true : undefined;
       const apiCategory = ["All", "Anomalies Only"].includes(category) ? undefined : category;
-      const data = await getTransactions(userId, {
-        month,
-        year,
-        category: apiCategory,
-        anomaly_only: anomalyOnly,
-        limit: 200,
-      });
+      const data = await getTransactions(
+        userId,
+        {
+          month,
+          year,
+          category: apiCategory,
+          anomaly_only: anomalyOnly,
+          limit: 200,
+        },
+        viewMode
+      );
       setRows(data || []);
     } catch (err) {
       setError(err.message || "Unable to load transactions");
     } finally {
       setLoading(false);
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [userId, month, year, category, modeVersion]);
+  }, [userId, month, year, category, viewMode]);
 
   useEffect(() => {
     load();

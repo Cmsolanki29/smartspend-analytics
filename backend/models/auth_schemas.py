@@ -81,6 +81,8 @@ class TokenResponse(BaseModel):
     refresh_token: str
     token_type: str = "bearer"
     expires_in: int
+    user_id: int | None = None
+    onboarding_required: bool = False
 
 
 class AuthUserResponse(BaseModel):

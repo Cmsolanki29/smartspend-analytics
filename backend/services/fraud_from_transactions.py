@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 from typing import Any
 
-from services.dashboard_scope import fetch_dashboard_mode, transaction_scope_sql
+from services.dashboard_scope import resolve_scope_mode, transaction_scope_sql
 
 
 def _severity_from_score(score: int) -> str:
@@ -36,11 +36,12 @@ def score_scoped_transactions(
     user_id: int,
     *,
     limit: int = 50,
-    min_risk: int = 35,
+    min_risk: int = 50,
     days: int = 120,
+    scope: str | None = None,
 ) -> list[dict[str, Any]]:
-    mode = fetch_dashboard_mode(cur, user_id)
-    scope = transaction_scope_sql("t", mode)
+    mode = resolve_scope_mode(cur, user_id, scope)
+    scope_sql = transaction_scope_sql("t", mode)
     since = date.today() - timedelta(days=days)
     cur.execute(
         f"""
@@ -50,7 +51,7 @@ def score_scoped_transactions(
         WHERE t.user_id = %s
           AND UPPER(t.type) = 'DEBIT'
           AND t.transaction_date >= %s
-          AND ({scope})
+          AND ({scope_sql})
         ORDER BY t.transaction_date DESC, t.transaction_time DESC NULLS LAST, t.id DESC
         LIMIT %s;
         """,
@@ -133,10 +134,10 @@ def score_scoped_transactions(
     return alerts
 
 
-def scoped_db_fraud_alerts(cur, user_id: int) -> list[dict[str, Any]]:
+def scoped_db_fraud_alerts(cur, user_id: int, scope: str | None = None) -> list[dict[str, Any]]:
     """fraud_alerts rows whose transaction is in the current dashboard scope."""
-    mode = fetch_dashboard_mode(cur, user_id)
-    scope = transaction_scope_sql("t", mode)
+    mode = resolve_scope_mode(cur, user_id, scope)
+    scope_sql = transaction_scope_sql("t", mode)
     _sev = """CASE
         WHEN COALESCE(fa.risk_score, 0) >= 85 THEN 'CRITICAL'
         WHEN COALESCE(fa.risk_score, 0) >= 65 THEN 'HIGH'
@@ -151,7 +152,7 @@ def scoped_db_fraud_alerts(cur, user_id: int) -> list[dict[str, Any]]:
                COALESCE(t.merchant, t.description, '')
         FROM fraud_alerts fa
         INNER JOIN transactions t ON t.id = fa.transaction_id AND t.user_id = fa.user_id
-        WHERE fa.user_id = %s AND ({scope})
+        WHERE fa.user_id = %s AND ({scope_sql})
         ORDER BY fa.risk_score DESC NULLS LAST, fa.created_at DESC;
         """,
         (user_id,),

@@ -11,8 +11,8 @@ import re
 from datetime import datetime
 from typing import Any
 
-from services.categorizer import resolve_category
 from services.document_parser_service import classify_and_extract_monster
+from services.transaction_upsert import enrich_transaction_row
 from services.monster_extraction import extract_with_retry, update_extraction_llm_result
 from services.statement_line_parser import parse_axis_style_statement
 from services.transaction_enrichment import heuristic_anomaly
@@ -171,8 +171,15 @@ class PDFParserAgent:
                 invalid += 1
                 continue
 
-            merchant = (txn.get("description") or "").strip()[:100] or "Unknown"
-            desc = (txn.get("description") or "")[:200]
+            row = enrich_transaction_row(
+                {
+                    "merchant": (txn.get("description") or "").strip()[:100] or "Unknown",
+                    "category": txn.get("category"),
+                    "description": (txn.get("description") or "")[:200],
+                }
+            )
+            merchant = row["merchant"]
+            desc = (row.get("description") or "")[:200]
             try:
                 amount = float(txn.get("amount", 0))
             except (TypeError, ValueError):
@@ -196,7 +203,8 @@ class PDFParserAgent:
                 duplicates += 1
                 continue
 
-            category = resolve_category(merchant, txn.get("category"))
+            category = row["category"]
+            normalized_merchant = row["normalized_merchant"]
             anomaly_flag, risk_score, risk_level, anomaly_reason = heuristic_anomaly(
                 merchant, desc, amount, raw_type
             )
@@ -205,11 +213,11 @@ class PDFParserAgent:
                 cur.execute(
                     """
                     INSERT INTO transactions
-                      (user_id, amount, type, category, merchant,
+                      (user_id, amount, type, category, merchant, normalized_merchant,
                        transaction_date, description,
                        uploaded_document_id, connected_source_id, data_origin,
                        anomaly_flag, risk_score, risk_level, anomaly_reason, ml_processed)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'monster_upload',
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'monster_upload',
                             %s, %s, %s, %s, TRUE)
                     """,
                     (
@@ -218,6 +226,7 @@ class PDFParserAgent:
                         raw_type,
                         category,
                         merchant,
+                        normalized_merchant,
                         txn_date,
                         desc,
                         document_id,

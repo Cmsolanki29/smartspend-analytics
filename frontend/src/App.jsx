@@ -24,7 +24,7 @@
  * See src/lib/design-tokens.ts for the full token reference.
  * ════════════════════════════════════════════════════════════════════
  */
-import React, { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useState } from "react";
+import React, { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import SourceSelection from "./pages/Onboarding/SourceSelection";
 import Dashboard from "./components/Dashboard/Dashboard";
 import { AuroraBackground } from "./components/intro/AuroraBackground";
@@ -40,10 +40,14 @@ import SubscriptionConnect from "./pages/SubscriptionConnect";
 import SubscriptionHub from "./pages/SubscriptionHub";
 import AIAnalysisEngine from "./pages/AIAnalysisEngine";
 import { isSubscriptionFlowConnected } from "./utils/subscriptionFlowStorage";
+import { resolveSubscriptionConnection } from "./utils/resolveSubscriptionConnection";
 import IntroFlow, { resetToIntroAuth } from "./components/intro/IntroFlow";
 import { ToastProvider } from "./components/common/Toast";
 import { SkeletonCard } from "./components/common/SkeletonCard";
 import { useAuth } from "./context/AuthContext";
+import { AppDataProvider } from "./context/AppDataContext";
+import { FinancialProvider } from "./context/FinancialContext";
+import { SubscriptionIntelligenceProvider } from "./context/SubscriptionIntelligenceContext";
 
 const TransactionsTab = lazy(() => import("./components/app-tabs/TransactionsTab"));
 const InsightsTab = lazy(() => import("./components/app-tabs/InsightsTab"));
@@ -85,15 +89,38 @@ const App = () => {
   /** After sign-in, show cinematic intro once per tab session before OTP / bank onboarding. */
   const [preOnboardIntroDone, setPreOnboardIntroDone] = useState(false);
 
-  /** When opening Subscriptions, land on connect vs hub (local flow state is keyed by JWT user id). */
-  useLayoutEffect(() => {
+  /** When opening Subscriptions, land on connect vs hub (local + server device link). */
+  useEffect(() => {
     if (activeTab !== "subscriptions") return;
     if (!subscriptionOwnerId) {
       setSubscriptionsSubView("connect");
       return;
     }
-    setSubscriptionsSubView(isSubscriptionFlowConnected(subscriptionOwnerId) ? "hub" : "connect");
+    if (isSubscriptionFlowConnected(subscriptionOwnerId)) {
+      setSubscriptionsSubView("hub");
+    }
+    let cancelled = false;
+    (async () => {
+      const connected = await resolveSubscriptionConnection(subscriptionOwnerId);
+      if (!cancelled) {
+        setSubscriptionsSubView(connected ? "hub" : "connect");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [activeTab, subscriptionOwnerId]);
+
+  useEffect(() => {
+    const onFlowChanged = (ev) => {
+      const uid = Number(ev?.detail?.userId) || subscriptionOwnerId;
+      if (uid === subscriptionOwnerId && isSubscriptionFlowConnected(subscriptionOwnerId)) {
+        setSubscriptionsSubView("hub");
+      }
+    };
+    window.addEventListener("ss-subscription-flow-changed", onFlowChanged);
+    return () => window.removeEventListener("ss-subscription-flow-changed", onFlowChanged);
+  }, [subscriptionOwnerId]);
 
   /** Remove stale `fraudTab` from URL when leaving 12-phase FraudShield (AI Intelligence). */
   useEffect(() => {
@@ -260,7 +287,10 @@ const App = () => {
     return (
       <ToastProvider>
         <div className="app-shell">
-          <div style={{ marginTop: 24 }}>
+          <div style={{ marginTop: 24, padding: "0 16px" }}>
+            <p className="text-sm text-gray-400" style={{ marginBottom: 12 }}>
+              Connecting to your account…
+            </p>
             <SkeletonCard lines={4} height={88} />
           </div>
         </div>
@@ -349,6 +379,9 @@ const App = () => {
 
   return (
     <ToastProvider>
+      <AppDataProvider>
+      <FinancialProvider>
+        <SubscriptionIntelligenceProvider>
       <div className="relative min-h-screen overflow-hidden bg-[#070418]">
         <AuroraBackground variant="app" />
 
@@ -490,6 +523,9 @@ const App = () => {
           </div>
         </div>
       </div>
+        </SubscriptionIntelligenceProvider>
+      </FinancialProvider>
+      </AppDataProvider>
     </ToastProvider>
   );
 };

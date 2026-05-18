@@ -244,7 +244,8 @@ def _enrich_goal(conn, user_id: int, row: tuple) -> dict[str, Any]:
     months_rem = _months_between(today, td)
     target_amount_f = float(target_amount or 0)
     saved_f = float(saved_amount or 0)
-    monthly_target = target_amount_f / months_rem if months_rem else target_amount_f
+    remaining = max(0.0, target_amount_f - saved_f)
+    monthly_target = remaining / months_rem if months_rem else remaining
     avg_saved = _avg_monthly_saved(conn, user_id)
     gap = max(0.0, monthly_target - avg_saved)
     binfo = _best_buy_info(category, td)
@@ -387,7 +388,9 @@ def add_goal(user_id: int, body: AddGoalBody, conn=Depends(get_db)):
 
     today = date.today()
     months_rem = _months_between(today, td)
-    monthly_target = float(body.target_amount) / months_rem
+    saved_initial = max(0.0, min(float(body.down_payment or 0), float(body.target_amount)))
+    remaining = max(0.0, float(body.target_amount) - saved_initial)
+    monthly_target = remaining / months_rem if months_rem else remaining
     binfo = _best_buy_info(body.category, td)
     best_buy_str = f"{binfo['month']} — {binfo['reason']}"
     amount_f = float(body.target_amount)
@@ -404,7 +407,6 @@ def add_goal(user_id: int, body: AddGoalBody, conn=Depends(get_db)):
     emi_vs = json.dumps(emi_payload)
     sacrifice = json.dumps(_build_sacrifice_plan(conn, user_id, max(0, monthly_target - _avg_monthly_saved(conn, user_id)), monthly_target))
 
-    saved_initial = down
     fk = (body.linked_festival_key or "").strip() or None
     dl = (body.display_timeline_label or "").strip() or None
 
@@ -452,6 +454,21 @@ def add_goal(user_id: int, body: AddGoalBody, conn=Depends(get_db)):
     row = cur.fetchone()
     goal_id_new = row[0] if row else None
     cur.close()
+    if fk or dl:
+        try:
+            from routes.festival_predictor import upsert_festival_budget_row
+
+            label = (dl or body.item_name).strip()
+            upsert_festival_budget_row(
+                conn,
+                user_id,
+                label,
+                td,
+                planned_budget=amount_f,
+                saved_so_far=saved_initial,
+            )
+        except Exception:
+            pass
     result = _enrich_goal(conn, user_id, row)
     # Fire cascade recalculation
     try:
@@ -805,8 +822,7 @@ def postpone_purchase_goal(user_id: int, goal_id: int, body: PostponeGoalBody, c
     }
 
 
-@router.post("/{user_id}/{goal_id}/complete")
-def complete_goal(user_id: int, goal_id: int, conn=Depends(get_db)):
+def _complete_goal_impl(user_id: int, goal_id: int, conn) -> dict[str, Any]:
     """Mark a purchase goal done — removes it from the active planner list."""
     cur = conn.cursor()
     cur.execute(
@@ -837,6 +853,7 @@ def complete_goal(user_id: int, goal_id: int, conn=Depends(get_db)):
         (final_saved, goal_id, user_id),
     )
     row2 = cur.fetchone()
+    conn.commit()
     cur.close()
     try:
         from services.financial_engine import recalculate_financial_state
@@ -857,6 +874,17 @@ def complete_goal(user_id: int, goal_id: int, conn=Depends(get_db)):
         "message": f"Goal “{row[1]}” marked complete.",
         "goal": _enrich_goal(conn, user_id, row2) if row2 else None,
     }
+
+
+@router.post("/{user_id}/{goal_id}/complete")
+def complete_goal(user_id: int, goal_id: int, conn=Depends(get_db)):
+    return _complete_goal_impl(user_id, goal_id, conn)
+
+
+@router.post("/{user_id}/goals/{goal_id}/complete")
+def complete_goal_nested(user_id: int, goal_id: int, conn=Depends(get_db)):
+    """Alias path (matches postpone URL style) for older frontends / proxies."""
+    return _complete_goal_impl(user_id, goal_id, conn)
 
 
 @router.delete("/{user_id}/{goal_id}")

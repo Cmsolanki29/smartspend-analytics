@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from db import get_db
 from models.schemas import MonthlyTrend, SpendingAnalysis
-from services.dashboard_scope import fetch_dashboard_mode, transaction_scope_sql
+from services.dashboard_scope import fetch_dashboard_mode, resolve_scope_mode, transaction_scope_sql
 from services.scorer import calculate_health_score
 
 router = APIRouter(prefix="/analysis", tags=["analysis"])
@@ -49,13 +49,15 @@ def _needs_scoped_transaction_trends(cur, user_id: int) -> bool:
     return False
 
 
-def _monthly_trends_from_transactions(cur, user_id: int) -> list[MonthlyTrend]:
+def _monthly_trends_from_transactions(
+    cur, user_id: int, scope: str | None = None
+) -> list[MonthlyTrend]:
     """
     Last 12 calendar months ending at CURRENT_DATE (user-wide; not scoped to dashboard M/Y).
     Income = CREDIT, expense = DEBIT; saved = max(0, income - expense).
     health_score / anomaly_count from monthly_summary for that month when present, else 0.
     """
-    mode = fetch_dashboard_mode(cur, user_id)
+    mode = resolve_scope_mode(cur, user_id, scope)
     scope = transaction_scope_sql("t", mode)
     cur.execute(
         f"""
@@ -127,12 +129,16 @@ def spending_by_category(
     user_id: int,
     month: int = Query(..., ge=1, le=12),
     year: int = Query(..., ge=2000, le=2100),
+    scope: Optional[str] = Query(
+        None,
+        description="bank_only | credit_card_only | merged",
+    ),
     conn=Depends(get_db),
 ):
     cur = conn.cursor()
     try:
-        mode = fetch_dashboard_mode(cur, user_id)
-        scope = transaction_scope_sql("tr", mode)
+        mode = resolve_scope_mode(cur, user_id, scope)
+        scope_sql = transaction_scope_sql("tr", mode)
         pm, py = (month - 1, year) if month > 1 else (12, year - 1)
         cur.execute(
             f"""
@@ -141,7 +147,7 @@ def spending_by_category(
                        SUM(tr.amount)::float AS total, COUNT(*)::int AS cnt
                 FROM transactions tr
                 WHERE tr.user_id = %s AND tr.type = 'DEBIT'
-                  AND ({scope})
+                  AND ({scope_sql})
                   AND EXTRACT(MONTH FROM tr.transaction_date)::int = %s
                   AND EXTRACT(YEAR FROM tr.transaction_date)::int = %s
                 GROUP BY 1
@@ -150,7 +156,7 @@ def spending_by_category(
                 SELECT COALESCE(tr.category, 'Uncategorized') AS category, SUM(tr.amount)::float AS total
                 FROM transactions tr
                 WHERE tr.user_id = %s AND tr.type = 'DEBIT'
-                  AND ({scope})
+                  AND ({scope_sql})
                   AND EXTRACT(MONTH FROM tr.transaction_date)::int = %s
                   AND EXTRACT(YEAR FROM tr.transaction_date)::int = %s
                 GROUP BY 1
@@ -193,7 +199,14 @@ def spending_by_category(
 
 
 @router.get("/{user_id}/trends", response_model=list[MonthlyTrend])
-def monthly_trends(user_id: int, conn=Depends(get_db)):
+def monthly_trends(
+    user_id: int,
+    scope: Optional[str] = Query(
+        None,
+        description="bank_only | credit_card_only | merged",
+    ),
+    conn=Depends(get_db),
+):
     """
     Rolling last-12-month series (newest month = current calendar month in DB session).
     Prefers ``monthly_summary``; if empty or all income/expense are zero, aggregates from
@@ -229,7 +242,7 @@ def monthly_trends(user_id: int, conn=Depends(get_db)):
             )
         summary_series = list(reversed(out))
         if _trends_rows_need_transaction_fallback(summary_series) or _needs_scoped_transaction_trends(cur, user_id):
-            return _monthly_trends_from_transactions(cur, user_id)
+            return _monthly_trends_from_transactions(cur, user_id, scope)
         return summary_series
     except Exception as e:
         raise HTTPException(500, str(e)) from e
@@ -242,6 +255,10 @@ def top_merchants(
     user_id: int,
     month: Optional[int] = Query(None, ge=1, le=12),
     year: Optional[int] = Query(None, ge=2000, le=2100),
+    scope: Optional[str] = Query(
+        None,
+        description="bank_only | credit_card_only | merged",
+    ),
     conn=Depends(get_db),
 ):
     today = date.today()
@@ -249,14 +266,14 @@ def top_merchants(
     y = year or today.year
     cur = conn.cursor()
     try:
-        mode = fetch_dashboard_mode(cur, user_id)
-        scope = transaction_scope_sql("tr", mode)
+        mode = resolve_scope_mode(cur, user_id, scope)
+        scope_sql = transaction_scope_sql("tr", mode)
         cur.execute(
             f"""
             SELECT merchant, SUM(tr.amount)::float AS s
             FROM transactions tr
             WHERE tr.user_id = %s AND tr.type = 'DEBIT'
-              AND ({scope})
+              AND ({scope_sql})
               AND EXTRACT(MONTH FROM tr.transaction_date)::int = %s
               AND EXTRACT(YEAR FROM tr.transaction_date)::int = %s
               AND tr.merchant IS NOT NULL AND tr.merchant <> ''

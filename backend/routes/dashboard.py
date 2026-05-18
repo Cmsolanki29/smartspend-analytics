@@ -2,16 +2,26 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from db import get_db
-from services.dashboard_scope import fetch_dashboard_mode, transaction_scope_sql
+
+from services.dashboard_scope import resolve_scope_mode, transaction_scope_sql
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
 
 @router.get("/source-breakdown")
-def get_source_breakdown(user_id: int, db=Depends(get_db)):
+def get_source_breakdown(
+    user_id: int,
+    scope: Optional[str] = Query(
+        None,
+        description="bank_only | credit_card_only | merged",
+    ),
+    db=Depends(get_db),
+):
     """
     Spending split by source type for the current calendar month.
     Returns bank vs credit-card breakdown + total spend + duplicate flag.
@@ -19,8 +29,8 @@ def get_source_breakdown(user_id: int, db=Depends(get_db)):
     cur = None
     try:
         cur = db.cursor()
-        mode = fetch_dashboard_mode(cur, user_id)
-        scope = transaction_scope_sql("t", mode)
+        mode = resolve_scope_mode(cur, user_id, scope)
+        scope_sql = transaction_scope_sql("t", mode)
 
         cur.execute(
             f"""
@@ -38,7 +48,7 @@ def get_source_breakdown(user_id: int, db=Depends(get_db)):
             LEFT JOIN connected_sources cs
                    ON cs.id = t.connected_source_id AND cs.user_id = t.user_id
             WHERE t.user_id = %s
-              AND ({scope})
+              AND ({scope_sql})
               AND t.transaction_date >= DATE_TRUNC('month', CURRENT_DATE)
               AND t.transaction_date  < DATE_TRUNC('month', CURRENT_DATE) + INTERVAL '1 month'
             GROUP BY source_type, source_name
@@ -64,7 +74,7 @@ def get_source_breakdown(user_id: int, db=Depends(get_db)):
             LEFT JOIN connected_sources cs
                    ON cs.id = t.connected_source_id AND cs.user_id = t.user_id
             WHERE t.user_id = %s
-              AND ({scope})
+              AND ({scope_sql})
               AND t.type = 'DEBIT'
               AND COALESCE(t.category, '') != 'internal_transfer'
               AND (

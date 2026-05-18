@@ -53,8 +53,10 @@ export const riskHealth = () =>
 
 // ── Phase 2 — Feature store / behavior profile ────────────────────────────
 // Not yet exposed on backend; graceful 404 → empty state
-export const getBehaviorProfile = (userId) =>
-  riskClient.get(`/risk/users/${userId}/behavior-profile`).then(d);
+export const getBehaviorProfile = (userId, scope = null) => {
+  const params = scope ? { scope, mode: scope } : {};
+  return riskClient.get(`/risk/users/${userId}/behavior-profile`, { params }).then(d);
+};
 
 // ── Phase 3 — Fraud labels / feedback stats ───────────────────────────────
 export const getFeedbackStats = (userId) =>

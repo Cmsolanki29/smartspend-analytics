@@ -10,7 +10,7 @@ from datetime import date, datetime, time
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from services.categorizer import categorize_merchant
+from services.transaction_upsert import enrich_transaction_row
 
 # LLM document parser uses lowercase slugs; map into app category vocabulary.
 _DOC_CATEGORY_MAP: dict[str, str] = {
@@ -32,14 +32,6 @@ _DOC_TYPE_TO_ORIGIN: dict[str, str] = {
     "salary_slip": "salary_document",
     "other": "ai_document",
 }
-
-
-def _map_category(raw: str | None, merchant_hint: str) -> str:
-    if raw and str(raw).strip():
-        key = str(raw).strip().lower()
-        if key in _DOC_CATEGORY_MAP:
-            return _DOC_CATEGORY_MAP[key]
-    return categorize_merchant(merchant_hint or "")
 
 
 def _parse_date(val: Any) -> date | None:
@@ -122,9 +114,17 @@ def merge_extracted_into_ledger(
                 continue
 
             desc = (raw.get("description") or "").strip() or None
-            merchant = (desc or "Unknown")[:200]
+            enriched = enrich_transaction_row(
+                {
+                    "merchant": (desc or "Unknown")[:200],
+                    "category": raw.get("category"),
+                    "description": desc,
+                }
+            )
+            merchant = enriched["merchant"]
             txn_type = _parse_txn_type(raw.get("type"))
-            cat = _map_category(raw.get("category"), merchant)[:50]
+            cat = str(enriched["category"])[:50]
+            normalized_merchant = enriched["normalized_merchant"]
 
             cur.execute(
                 """
@@ -155,12 +155,12 @@ def merge_extracted_into_ledger(
                 """
                 INSERT INTO transactions (
                     user_id, transaction_date, transaction_time, amount, type, description,
-                    merchant, category, subcategory, payment_method, location,
+                    merchant, normalized_merchant, category, subcategory, payment_method, location,
                     anomaly_flag, risk_score, risk_level, anomaly_reason, ml_processed,
                     hour_of_day, day_of_week, is_weekend, is_night_txn,
                     document_origin, source_document_id
                 ) VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                     FALSE, 0, 'LOW', NULL, FALSE,
                     %s, %s, %s, %s,
                     %s, %s::uuid
@@ -174,6 +174,7 @@ def merge_extracted_into_ledger(
                     txn_type,
                     desc,
                     merchant[:200],
+                    normalized_merchant,
                     cat,
                     doc_type,
                     "DocumentImport",

@@ -9,13 +9,16 @@ import { getSubscriptionFlowState } from "../utils/subscriptionFlowStorage";
  * Persist linked apps from the connect / add-apps flow to the backend (seeds usage + subscriptions,
  * evaluates verdicts, schedules reminders). Requires a valid JWT for `userId`.
  */
-export async function syncLinkedAppsToBackend(userId) {
+export async function syncLinkedAppsToBackend(userId, appIdsOverride) {
   const uid = Number(userId);
   if (!uid || Number.isNaN(uid)) {
     return { ok: false, reason: "bad_user" };
   }
 
-  const { apps } = getSubscriptionFlowState(uid);
+  const apps =
+    Array.isArray(appIdsOverride) && appIdsOverride.length > 0
+      ? appIdsOverride
+      : getSubscriptionFlowState(uid).apps;
   if (!apps || apps.length === 0) {
     return { ok: false, reason: "no_apps" };
   }

@@ -829,6 +829,47 @@ def chat(
     )
 
 
+class ValidateDocBody(BaseModel):
+    institution_name: str = ""
+    account_holder_name: str | None = None
+
+
+def _identity_case_from_scope(scope: str | None) -> str:
+    if scope == "linked_full":
+        return "A"
+    if scope == "unlinked_same_bank":
+        return "B"
+    return "C"
+
+
+@router.post("/validate-doc")
+def validate_uploaded_document(
+    body: ValidateDocBody,
+    user_id: int = Depends(get_current_user_id),
+):
+    """Validate uploaded statement metadata against linked accounts and user name."""
+    connected = _fetch_connected_sources_list(user_id)
+    doc_info = {
+        "institution_name": (body.institution_name or "").strip(),
+        "account_holder_name": (body.account_holder_name or "").strip() or None,
+    }
+    identity_scope = resolve_identity_scope(user_id, doc_info, connected)
+    scope = identity_scope.get("scope") or "unlinked_foreign"
+    case = _identity_case_from_scope(scope)
+    user_name = identity_scope.get("user_name") or get_user_name(user_id)
+    first_name = (user_name or "there").split()[0]
+    return {
+        "case": case,
+        "full_access": case == "A",
+        "message": identity_scope.get("warning_message"),
+        "doc_institution": doc_info.get("institution_name") or "unknown",
+        "suggestion": identity_scope.get("nudge_message"),
+        "identity_scope": scope,
+        "user_name": user_name,
+        "first_name": first_name,
+    }
+
+
 @router.post("/upload")
 async def upload_document(
     file: UploadFile = File(...),

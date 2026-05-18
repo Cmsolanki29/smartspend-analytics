@@ -65,7 +65,14 @@ class ModelRegistry:
         """Configure MLflow tracking URI from settings.  Defers actual connection."""
         self._available = False
         self._client: Any | None = None
-        self._init_mlflow()
+        import os
+
+        if os.getenv("SMARTSPEND_SKIP_MLFLOW_INIT", "1").lower() not in ("1", "true", "yes"):
+            self._init_mlflow()
+
+    def _ensure_mlflow(self) -> None:
+        if not self._available and self._client is None:
+            self._init_mlflow()
 
     def _init_mlflow(self) -> None:
         """Attempt MLflow initialization.  Safe to call multiple times."""
@@ -249,6 +256,7 @@ class ModelRegistry:
         Returns:
             Trained XGBClassifier or None.
         """
+        self._ensure_mlflow()
         if self._available:
             try:
                 import mlflow.xgboost
@@ -272,6 +280,7 @@ class ModelRegistry:
         Returns:
             Trained XGBClassifier or None.
         """
+        self._ensure_mlflow()
         if not self._available:
             return None
         try:

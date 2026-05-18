@@ -6,7 +6,7 @@ import re
 from datetime import date, datetime, timedelta
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from db import get_db
@@ -556,7 +556,15 @@ def list_fraud_patterns(conn=Depends(get_db)):
 
 
 @router.get("/{user_id}/alerts")
-def list_alerts(user_id: int, severity: str | None = None, conn=Depends(get_db)):
+def list_alerts(
+    user_id: int,
+    severity: str | None = None,
+    scope: str | None = Query(
+        None,
+        description="bank_only | credit_card_only | merged",
+    ),
+    conn=Depends(get_db),
+):
     from services.fraud_from_transactions import (
         merge_alerts,
         score_scoped_transactions,
@@ -572,9 +580,10 @@ def list_alerts(user_id: int, severity: str | None = None, conn=Depends(get_db))
     valid_severities = {"LOW", "MEDIUM", "HIGH", "CRITICAL"}
     sev_filter = severity.upper() if severity and severity.upper() in valid_severities else None
 
-    db_alerts = scoped_db_fraud_alerts(cur, user_id)
-    txn_alerts = score_scoped_transactions(cur, user_id)
+    db_alerts = scoped_db_fraud_alerts(cur, user_id, scope)
+    txn_alerts = score_scoped_transactions(cur, user_id, scope=scope, min_risk=50)
     alerts = merge_alerts(db_alerts, txn_alerts)
+    alerts = [a for a in alerts if int(a.get("risk_score") or 0) >= 50]
     if sev_filter:
         alerts = [a for a in alerts if (a.get("severity") or "").upper() == sev_filter]
     cur.close()
@@ -795,7 +804,14 @@ def alert_action_by_transaction(
 
 
 @router.get("/{user_id}/stats")
-def fraud_stats(user_id: int, conn=Depends(get_db)):
+def fraud_stats(
+    user_id: int,
+    scope: str | None = Query(
+        None,
+        description="bank_only | credit_card_only | merged",
+    ),
+    conn=Depends(get_db),
+):
     from services.fraud_from_transactions import (
         merge_alerts,
         score_scoped_transactions,
@@ -808,7 +824,10 @@ def fraud_stats(user_id: int, conn=Depends(get_db)):
         cur.close()
         raise HTTPException(404, "User not found")
 
-    alerts = merge_alerts(scoped_db_fraud_alerts(cur, user_id), score_scoped_transactions(cur, user_id))
+    alerts = merge_alerts(
+        scoped_db_fraud_alerts(cur, user_id, scope),
+        score_scoped_transactions(cur, user_id, scope=scope),
+    )
     attempts = len(alerts)
     threats_blocked = sum(1 for a in alerts if (a.get("user_action") or "").upper() == "BLOCKED")
     money_saved_total = sum(float(a.get("money_saved") or 0) for a in alerts if (a.get("user_action") or "").upper() == "BLOCKED")
@@ -898,7 +917,14 @@ def fraud_stats(user_id: int, conn=Depends(get_db)):
 
 
 @router.get("/{user_id}/analyze")
-def analyze_fraud(user_id: int, conn=Depends(get_db)):
+def analyze_fraud(
+    user_id: int,
+    scope: str | None = Query(
+        None,
+        description="bank_only | credit_card_only | merged",
+    ),
+    conn=Depends(get_db),
+):
     cur = conn.cursor()
     cur.execute("SELECT name FROM users WHERE id = %s;", (user_id,))
     urow = cur.fetchone()
@@ -908,7 +934,9 @@ def analyze_fraud(user_id: int, conn=Depends(get_db)):
     user_name = urow[0]
 
     since = date.today() - timedelta(days=30)
-    _mode = fetch_dashboard_mode(cur, user_id)
+    from services.dashboard_scope import resolve_scope_mode
+
+    _mode = resolve_scope_mode(cur, user_id, scope)
     _scope = transaction_scope_sql("t", _mode)
     cur.execute(
         f"""

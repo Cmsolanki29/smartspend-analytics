@@ -18,6 +18,7 @@ import {
   Sparkles,
 } from "lucide-react";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from "recharts";
+import { useViewMode } from "../../context/ViewModeContext";
 import { getBehaviorProfile } from "../../services/riskApi";
 import { RiskStatePlaceholder } from "../../components/risk/RiskStatePlaceholder";
 import { fmtRelativeTime } from "../../utils/risk/formatters";
@@ -284,6 +285,7 @@ function ActivityRow({ item, index, embedded }) {
 }
 
 const BehaviorProfile = ({ userId = 1, onNavigate, embedded = false }) => {
+  const { viewMode } = useViewMode();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [profileError, setProfileError] = useState(null);
@@ -293,7 +295,7 @@ const BehaviorProfile = ({ userId = 1, onNavigate, embedded = false }) => {
     setLoading(true);
     setProfileError(null);
 
-    getBehaviorProfile(userId)
+    getBehaviorProfile(userId, viewMode)
       .then((res) => {
         if (!cancelled) {
           setData(res);
@@ -312,7 +314,26 @@ const BehaviorProfile = ({ userId = 1, onNavigate, embedded = false }) => {
     return () => {
       cancelled = true;
     };
-  }, [userId]);
+  }, [userId, viewMode]);
+
+  useEffect(() => {
+    const handler = () => {
+      setLoading(true);
+      getBehaviorProfile(userId, viewMode)
+        .then((res) => {
+          setData(res);
+          setProfileError(null);
+        })
+        .catch(() => setProfileError("Could not load behavior profile."))
+        .finally(() => setLoading(false));
+    };
+    window.addEventListener("smartspend:data-updated", handler);
+    window.addEventListener("dashboardModeChanged", handler);
+    return () => {
+      window.removeEventListener("smartspend:data-updated", handler);
+      window.removeEventListener("dashboardModeChanged", handler);
+    };
+  }, [userId, viewMode]);
 
   const d = data;
   const highlightHours = useMemo(() => anomalyHighlightHours(d?.anomalies), [d?.anomalies]);
@@ -362,11 +383,14 @@ const BehaviorProfile = ({ userId = 1, onNavigate, embedded = false }) => {
         <RiskStatePlaceholder loading />
       ) : profileError ? (
         <RiskStatePlaceholder empty title="Behavior profile unavailable" message={profileError} />
-      ) : !d ? (
+      ) : !d || d?.empty ? (
         <RiskStatePlaceholder
           empty
-          title="No behavior data yet"
-          message="Upload transactions or switch dashboard mode. Patterns are built from your real spending history."
+          title="No behavior data in this view"
+          message={
+            d?.message ||
+            "No transactions in this view yet. Upload a statement or switch merged / bank / card mode."
+          }
         />
       ) : (
         <>

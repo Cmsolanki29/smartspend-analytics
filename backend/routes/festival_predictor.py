@@ -17,7 +17,8 @@ from services.financial_constraints import monthly_surplus_snapshot
 
 router = APIRouter(prefix="/festivals", tags=["Festival Predictor"])
 
-HORIZON_DAYS = 183
+HORIZON_DAYS = 183  # preset Indian calendar slots shown in planner
+CUSTOM_EVENT_MAX_DAYS = 1825  # user-created plans (weddings, school fees) up to ~5 years
 
 INDIAN_FESTIVALS_2026: list[dict[str, Any]] = [
     {"name": "Holi", "date": "2026-03-29", "typical_categories": ["Clothes", "Food", "Colors"]},
@@ -158,8 +159,8 @@ def _typical_categories(festival_name: str) -> list[str]:
     return ["Gifts", "Food", "Travel"]
 
 
-def _horizon_end(today: date) -> date:
-    return date.fromordinal(today.toordinal() + HORIZON_DAYS)
+def _horizon_end(today: date, days: int = HORIZON_DAYS) -> date:
+    return date.fromordinal(today.toordinal() + days)
 
 
 def _resolve_festival_date(
@@ -226,6 +227,52 @@ def _fetch_budget_row(conn, user_id: int, fest_name: str, fest_date: date) -> Op
     return None
 
 
+def upsert_festival_budget_row(
+    conn,
+    user_id: int,
+    fest_name: str,
+    fest_date: date,
+    *,
+    planned_budget: float = 0,
+    saved_so_far: float = 0,
+    category_breakdown: Optional[dict[str, float]] = None,
+) -> None:
+    """Ensure a user event appears in the festival planner list (any user_id)."""
+    today = date.today()
+    days_rem = max((fest_date - today).days, 0)
+    months_rem = max(days_rem / 30.0, 0.25)
+    planned = float(planned_budget or 0)
+    saved = float(saved_so_far or 0)
+    remaining = max(0.0, planned - saved)
+    monthly_needed = remaining / months_rem if months_rem else 0.0
+    cb_json = json.dumps(category_breakdown or {})
+    row = _fetch_budget_row(conn, user_id, fest_name, fest_date)
+    cur = conn.cursor()
+    if row:
+        cur.execute(
+            """
+            UPDATE festival_budgets
+            SET planned_budget = CASE WHEN %s > 0 THEN %s ELSE planned_budget END,
+                saved_so_far = GREATEST(saved_so_far, %s),
+                category_breakdown = CASE WHEN %s::jsonb <> '{}'::jsonb THEN %s::jsonb ELSE category_breakdown END,
+                days_remaining = %s, monthly_target = %s, festival_date = %s, status = 'UPCOMING'
+            WHERE id = %s;
+            """,
+            (planned, planned, saved, cb_json, cb_json, days_rem, monthly_needed, fest_date, row[0]),
+        )
+    else:
+        cur.execute(
+            """
+            INSERT INTO festival_budgets (
+              user_id, festival_name, festival_date, last_year_spent, planned_budget,
+              saved_so_far, monthly_target, days_remaining, status, category_breakdown
+            ) VALUES (%s, %s, %s, 0, %s, %s, %s, %s, 'UPCOMING', %s::jsonb);
+            """,
+            (user_id, fest_name.strip(), fest_date, planned, saved, monthly_needed, days_rem, cb_json),
+        )
+    cur.close()
+
+
 def _iter_upcoming_festival_slots(
     conn,
     user_id: int,
@@ -233,6 +280,7 @@ def _iter_upcoming_festival_slots(
     horizon: date,
 ) -> list[tuple[str, date, bool]]:
     """Return (name, date, is_custom) sorted by date — DB rows plus calendar defaults."""
+    custom_horizon = _horizon_end(today, CUSTOM_EVENT_MAX_DAYS)
     cur = conn.cursor()
     cur.execute(
         """
@@ -241,7 +289,7 @@ def _iter_upcoming_festival_slots(
         WHERE user_id = %s AND festival_date > %s AND festival_date <= %s
         ORDER BY festival_date ASC, festival_name ASC;
         """,
-        (user_id, today, horizon),
+        (user_id, today, custom_horizon),
     )
     db_rows = cur.fetchall()
     cur.close()
@@ -715,45 +763,26 @@ def create_planned_event(user_id: int, body: CreateEventBody, conn=Depends(get_d
     cur.close()
 
     today = date.today()
-    horizon = _horizon_end(today)
+    custom_horizon = _horizon_end(today, CUSTOM_EVENT_MAX_DAYS)
     if body.festival_date <= today:
         raise HTTPException(400, "Event date must be in the future.")
-    if body.festival_date > horizon:
-        raise HTTPException(400, f"Event must fall within the next {HORIZON_DAYS} days.")
+    if body.festival_date > custom_horizon:
+        raise HTTPException(
+            400,
+            f"Event must be within the next {CUSTOM_EVENT_MAX_DAYS} days (~5 years).",
+        )
 
     fest_name = body.festival_name.strip()
     fest_date = body.festival_date
-    days_rem = (fest_date - today).days
-    months_rem = max(days_rem / 30.0, 0.25)
     planned = float(body.planned_budget or 0)
-    remaining = max(0.0, planned)
-    monthly_needed = remaining / months_rem if months_rem else 0.0
-    cb_json = json.dumps(body.category_budgets or {})
-
-    cur = conn.cursor()
-    row = _fetch_budget_row(conn, user_id, fest_name, fest_date)
-    if row:
-        cur.execute(
-            """
-            UPDATE festival_budgets
-            SET planned_budget = CASE WHEN %s > 0 THEN %s ELSE planned_budget END,
-                category_breakdown = CASE WHEN %s::jsonb <> '{}'::jsonb THEN %s::jsonb ELSE category_breakdown END,
-                days_remaining = %s, monthly_target = %s, festival_date = %s
-            WHERE id = %s;
-            """,
-            (planned, planned, cb_json, cb_json, days_rem, monthly_needed, fest_date, row[0]),
-        )
-    else:
-        cur.execute(
-            """
-            INSERT INTO festival_budgets (
-              user_id, festival_name, festival_date, last_year_spent, planned_budget,
-              saved_so_far, monthly_target, days_remaining, status, category_breakdown
-            ) VALUES (%s, %s, %s, 0, %s, 0, %s, %s, 'UPCOMING', %s::jsonb);
-            """,
-            (user_id, fest_name, fest_date, planned, monthly_needed, days_rem, cb_json),
-        )
-    cur.close()
+    upsert_festival_budget_row(
+        conn,
+        user_id,
+        fest_name,
+        fest_date,
+        planned_budget=planned,
+        category_breakdown=body.category_budgets or {},
+    )
 
     try:
         from services.financial_engine import recalculate_financial_state as _rfs

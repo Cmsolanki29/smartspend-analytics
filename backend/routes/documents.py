@@ -383,53 +383,24 @@ async def upload_statement(
     result["source_id"] = source_id
     if result.get("success"):
         try:
-            from datetime import date as _date
-
-            from services.financial_engine import recalculate_financial_state
-            from services.openai_service import invalidate_insight_cache
-
             imported = int(result.get("imported") or 0)
+            source_name = str(result.get("institution") or institution_name or "Statement")
             if imported > 0:
-                cur = conn.cursor()
-                cur.execute(
-                    """
-                    DELETE FROM transactions
-                    WHERE user_id = %s AND connected_source_id IS NULL
-                    """,
-                    (user_id,),
+                from services.upload_pipeline import run_post_import_pipeline
+
+                pipeline_summary = run_post_import_pipeline(
+                    user_id,
+                    conn,
+                    source_name=source_name,
+                    scope=None,
+                    date_range=result.get("date_range"),
+                    purge_orphans=True,
+                    document_id=doc_id,
                 )
-                purged = cur.rowcount
-                cur.close()
-                if purged:
-                    logger.warning(
-                        "[upload] purged %s non-statement transactions user_id=%s",
-                        purged,
-                        user_id,
-                    )
-                    result["orphan_transactions_purged"] = purged
-
-            today = _date.today()
-            invalidate_insight_cache(conn, user_id, today.month, today.year)
-            recalculate_financial_state(
-                conn,
-                user_id,
-                trigger_type="statement_upload",
-                trigger_id=doc_id,
-                trigger_summary=f"Imported {result.get('imported', 0)} transactions",
-            )
-            from services.transaction_enrichment import sync_monthly_summaries_for_document
-
-            sync_monthly_summaries_for_document(conn, user_id, result.get("date_range"))
-            try:
-                from services.fraud_pipeline import run_post_upload_pipeline
-
-                pipeline_summary = run_post_upload_pipeline(user_id, conn)
-                result["fraud_pipeline"] = pipeline_summary
-            except Exception:
-                logger.exception("[upload] FraudShield pipeline failed user_id=%s", user_id)
+                result.update(pipeline_summary)
             conn.commit()
         except Exception:
-            logger.exception("[upload] post-upload recalc failed user_id=%s", user_id)
+            logger.exception("[upload] post-upload pipeline failed user_id=%s", user_id)
     logger.warning(
         "[upload] ok document_id=%s source_id=%s success=%s imported=%s",
         doc_id,

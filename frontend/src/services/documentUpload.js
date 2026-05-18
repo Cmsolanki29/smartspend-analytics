@@ -2,6 +2,7 @@
  * Shared document upload — used by signup (SourceSelection) and Settings (UploadStatement).
  * Both paths call POST /api/documents/upload → monster extraction pipeline.
  */
+import { dispatchDataUpdated } from "../utils/refetchAll";
 import { getAccessToken } from "./api";
 import { getApiBaseUrl } from "./apiBaseUrl";
 
@@ -84,7 +85,13 @@ export async function uploadFinancialDocument({
     throw new Error(extractUploadError(data));
   }
   if (typeof window !== "undefined") {
-    window.dispatchEvent(new CustomEvent("dashboardModeChanged"));
+    const imported = Number(data?.imported ?? 0);
+    if (imported > 0 || data?.data_updated) {
+      dispatchDataUpdated({
+        userId,
+        sourceName: data?.source_name || data?.institution || institutionName,
+      });
+    }
   }
   return data;
 }

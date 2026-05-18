@@ -1,6 +1,6 @@
 # start-frontend.ps1
 # Starts the CRA dev server on port 3000 (default) after freeing that port.
-# Clears a stale REACT_APP_API_URL from the parent shell so the app uses /api + proxy → :8001.
+# Clears a stale REACT_APP_API_URL from the parent shell so the app uses /api + setupProxy → :8002.
 #
 # Usage:
 #   .\start-frontend.ps1           # port 3000
@@ -58,6 +58,17 @@ if (Test-Path $cacheDir) {
     Write-Host "[start-frontend] Cleared webpack cache" -ForegroundColor Cyan
 }
 
-Write-Host "[start-frontend] Starting React on http://localhost:$Port (API via /api → 127.0.0.1:8001) ..." -ForegroundColor Green
+$backendPort = 8002
+$portFile = Join-Path $PSScriptRoot "frontend\.backend-port"
+if (Test-Path -LiteralPath $portFile) {
+    try {
+        $backendPort = [int](Get-Content -LiteralPath $portFile -Raw).Trim()
+    } catch { }
+}
+try {
+    Set-Content -Path $portFile -Value "$backendPort" -Encoding ascii -NoNewline
+} catch { }
+
+Write-Host "[start-frontend] Starting React on http://localhost:$Port (API via /api → 127.0.0.1:$backendPort) ..." -ForegroundColor Green
 Set-Location -Path "$PSScriptRoot\frontend"
 npm start

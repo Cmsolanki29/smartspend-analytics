@@ -7,6 +7,7 @@ import {
   postPurchasePostponeGoal,
   putPurchaseUpdateSavings,
 } from "../../services/api";
+import { useFinancial } from "../../context/FinancialContext";
 import { useToast } from "../common/Toast";
 import { EmptyState } from "../common/EmptyState";
 import { ErrorCard } from "../common/ErrorCard";
@@ -35,6 +36,7 @@ const fmt = (n) =>
 const priorityRank = (p) => (p === "HIGH" ? 0 : p === "MEDIUM" ? 1 : 2);
 
 const PurchasePlanner = ({ userId }) => {
+  const { financialSummary, refreshFinancials } = useFinancial();
   const { showToast } = useToast();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -115,6 +117,7 @@ const PurchasePlanner = ({ userId }) => {
       setTargetAmount("");
       setTargetDate("");
       await load();
+      await refreshFinancials();
       dispatchPlannerSync(userId);
       showToast("Goal added successfully! ✅");
     } catch (e) {
@@ -182,16 +185,36 @@ const PurchasePlanner = ({ userId }) => {
     ) {
       return;
     }
-    setCompletingId(goal.goal_id);
+    const gid = goal?.goal_id ?? goal?.id;
+    if (!gid) {
+      showToast("Goal id missing — refresh the page and try again.");
+      return;
+    }
+    setCompletingId(gid);
     try {
-      await completePurchaseGoal(userId, goal.goal_id);
+      await completePurchaseGoal(userId, gid);
+      setData((prev) => {
+        if (!prev?.goals) return prev;
+        const goals = prev.goals.filter((g) => (g.goal_id ?? g.id) !== gid);
+        const totalMonthly = goals.reduce((s, g) => s + Number(g.monthly_target || 0), 0);
+        const onTrackCount = goals.filter((g) => g.on_track === true).length;
+        const avgSaved = Number(prev.current_savings_rate_monthly || 0);
+        return {
+          ...prev,
+          goals,
+          goals_on_track: onTrackCount,
+          goals_total: goals.length,
+          total_monthly_saving_needed: totalMonthly,
+          gap_monthly: Math.max(0, totalMonthly - avgSaved),
+        };
+      });
       await load();
       dispatchPlannerSync(userId);
       setCelebrate({ pct: 100, msg: `${name} — done!` });
       setTimeout(() => setCelebrate(null), 4500);
       showToast("Marked complete — nice work!");
     } catch (e) {
-      showToast(e.message || "Could not mark complete");
+      showToast(e.message || "Could not mark complete", "error");
     } finally {
       setCompletingId(null);
     }
