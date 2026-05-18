@@ -2,6 +2,7 @@ import React, { useId, useMemo } from "react";
 import { motion, useReducedMotion } from "framer-motion";
 import { FileWarning, Flag, IndianRupee, Users } from "lucide-react";
 import type { MetricData } from "./mockData";
+import { CHAINVAULT } from "./chainVaultTheme";
 
 const ICONS = {
   flag: Flag,
@@ -59,9 +60,10 @@ function Sparkline({ values, color }: { values: number[]; color: string }) {
 
 type Props = {
   metrics: MetricData[];
+  premium?: boolean;
 };
 
-export default function MetricCards({ metrics }: Props) {
+export default function MetricCards({ metrics, premium }: Props) {
   const reduce = useReducedMotion();
 
   return (
@@ -82,8 +84,12 @@ export default function MetricCards({ metrics }: Props) {
             initial={reduce ? false : { opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: reduce ? 0 : 0.06 * idx, duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
-            className="relative overflow-hidden rounded-xl border border-white/[0.06] p-6"
-            style={{ background: "#1a1d27" }}
+            className="relative overflow-hidden rounded-xl border p-6"
+            style={{
+              background: premium ? CHAINVAULT.cardBgElevated : "#1a1d27",
+              borderColor: premium ? CHAINVAULT.goldBorderSoft : "rgba(255,255,255,0.06)",
+              boxShadow: premium ? `0 0 40px -16px ${CHAINVAULT.goldGlow}` : undefined,
+            }}
           >
             <div
               className="pointer-events-none absolute inset-0 opacity-[0.14]"
@@ -112,12 +118,15 @@ export default function MetricCards({ metrics }: Props) {
                 </span>
               ) : null}
             </div>
-            <p className="relative mt-5 text-[11px] font-semibold uppercase tracking-[0.12em]" style={{ color: "#8b8fa8" }}>
+            <p
+              className="relative mt-5 text-[11px] font-semibold uppercase tracking-[0.12em]"
+              style={{ color: premium ? CHAINVAULT.muted : "#8b8fa8" }}
+            >
               {m.label}
             </p>
             <p className="relative mt-1.5 text-4xl font-bold tracking-tight text-white tabular-nums">{m.value}</p>
             {m.subtitle ? (
-              <p className="relative mt-1 text-xs" style={{ color: "#8b8fa8" }}>
+              <p className="relative mt-1 text-xs" style={{ color: premium ? CHAINVAULT.muted : "#8b8fa8" }}>
                 {m.subtitle}
               </p>
             ) : null}

@@ -40,7 +40,7 @@ const NAV_SECTIONS = [
     items: [
       { id: "insights", label: "AI Insights", icon: Lightbulb },
       { id: "subscriptions", label: "Subscriptions AI", icon: Zap },
-      { id: "fraud", label: "FraudShield", icon: Shield },
+      { id: "fraud", label: "FraudShield · 12-Phase", icon: Shield },
       { id: "dark-patterns", label: "Dark Patterns", icon: AlertTriangle },
     ],
   },
@@ -65,9 +65,16 @@ const NAV_SECTIONS = [
   {
     id: "risk-awareness",
     label: "Risk Awareness",
+    premiumSection: true,
     items: [
       { id: "cybersafe-connect", label: "CyberSafe Connect", icon: ShieldCheck, newBadge: true },
-      { id: "fraud-shield", label: "FraudShield", icon: ShieldAlert },
+      {
+        id: "fraud-shield",
+        label: "ChainVault",
+        icon: ShieldAlert,
+        premiumGold: true,
+        premiumBadge: "1st in India",
+      },
     ],
   },
   {
@@ -101,6 +108,7 @@ const Sidebar = ({ collapsed, onToggle, activeTab, onTabChange, onLogout, fraudB
   const renderNavButton = (item) => {
     const Icon = item.icon;
     const isActive = activeTab === item.id;
+    const isGold = Boolean(item.premiumGold);
     return (
       <motion.button
         key={item.id}
@@ -110,24 +118,50 @@ const Sidebar = ({ collapsed, onToggle, activeTab, onTabChange, onLogout, fraudB
         whileTap={{ scale: 0.98 }}
         className={`group relative flex w-full min-h-[48px] items-center gap-3 rounded-xl px-3 py-2.5 text-left transition-all duration-500 ease-brand md:min-h-0 ${
           isActive
-            ? "bg-white/[0.08] text-white shadow-[inset_0_0_0_1px_rgba(255,255,255,0.06)]"
-            : "text-slate-400 hover:bg-white/[0.05] hover:text-white"
+            ? isGold
+              ? "text-white shadow-[inset_0_0_0_1px_rgba(212,175,55,0.22)]"
+              : "bg-white/[0.08] text-white shadow-[inset_0_0_0_1px_rgba(255,255,255,0.06)]"
+            : isGold
+              ? "text-amber-100/70 hover:bg-amber-500/[0.06] hover:text-amber-50"
+              : "text-slate-400 hover:bg-white/[0.05] hover:text-white"
         }`}
+        style={
+          isActive && isGold
+            ? { background: "linear-gradient(90deg, rgba(212,175,55,0.14) 0%, rgba(212,175,55,0.04) 100%)" }
+            : undefined
+        }
       >
         {isActive ? (
           <motion.div
             layoutId="nav-active-bar"
-            className="absolute left-0 top-1/2 h-8 w-1 -translate-y-1/2 rounded-r-full bg-ss-brand shadow-[0_0_16px_rgba(124,58,237,0.55)]"
+            className={`absolute left-0 top-1/2 h-8 w-1 -translate-y-1/2 rounded-r-full ${
+              isGold
+                ? "bg-gradient-to-b from-amber-200 via-amber-400 to-amber-700 shadow-[0_0_16px_rgba(212,175,55,0.55)]"
+                : "bg-ss-brand shadow-[0_0_16px_rgba(124,58,237,0.55)]"
+            }`}
             transition={{ type: "spring", stiffness: 500, damping: 34 }}
           />
         ) : null}
         <Icon
           size={18}
-          className={`${collapsed ? "mx-auto" : ""} shrink-0 ${isActive ? "text-white" : "text-slate-400 group-hover:text-white"}`}
+          className={`${collapsed ? "mx-auto" : ""} shrink-0 ${
+            isActive
+              ? isGold
+                ? "text-amber-200"
+                : "text-white"
+              : isGold
+                ? "text-amber-200/60 group-hover:text-amber-100"
+                : "text-slate-400 group-hover:text-white"
+          }`}
         />
         {!collapsed ? <span className="flex-1 truncate text-left text-sm font-medium">{item.label}</span> : null}
         {!collapsed && item.badge ? (
           <span className="rounded-md bg-exiqo-pink px-2 py-0.5 text-xs font-bold text-white shadow-pink-glow">{item.badge}</span>
+        ) : null}
+        {!collapsed && item.premiumBadge ? (
+          <span className="rounded-md border border-amber-400/35 bg-amber-500/15 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-amber-100">
+            {item.premiumBadge}
+          </span>
         ) : null}
         {!collapsed && item.newBadge ? (
           <span className="rounded-md border border-purple-500/40 bg-purple-500/20 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-purple-200">
@@ -187,12 +221,27 @@ const Sidebar = ({ collapsed, onToggle, activeTab, onTabChange, onLogout, fraudB
           {NAV_SECTIONS.map((section, idx) => (
             <div key={section.id} className={idx > 0 ? "mt-5" : ""}>
               {!collapsed ? (
-                <div className={`px-4 pb-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500 ${idx === 0 ? "pt-4" : "pt-1"}`}>
+                <div
+                  className={`px-4 pb-2 text-[10px] font-semibold uppercase tracking-[0.18em] ${idx === 0 ? "pt-4" : "pt-1"} ${
+                    section.premiumSection
+                      ? "bg-gradient-to-r from-amber-200/90 via-amber-100/80 to-amber-300/70 bg-clip-text text-transparent"
+                      : "text-slate-500"
+                  }`}
+                >
                   {section.label}
                 </div>
               ) : null}
               {collapsed && idx > 0 ? <div className="mx-2 my-3 border-t border-white/[0.06]" /> : null}
-              <div className="space-y-1">{section.items.map((item) => renderNavButton(item))}</div>
+              {section.premiumSection ? (
+                <div
+                  className="mx-0.5 space-y-1 rounded-xl border p-1"
+                  style={{ borderColor: 'rgba(212, 175, 55, 0.14)', background: 'linear-gradient(180deg, rgba(212,175,55,0.05) 0%, transparent 100%)' }}
+                >
+                  {section.items.map((item) => renderNavButton(item))}
+                </div>
+              ) : (
+                <div className="space-y-1">{section.items.map((item) => renderNavButton(item))}</div>
+              )}
             </div>
           ))}
         </nav>

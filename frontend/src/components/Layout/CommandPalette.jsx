@@ -35,13 +35,13 @@ const NAV_ITEMS = [
   { id: "transactions",  label: "Transactions",      icon: ArrowRightLeft,  group: "Workspace",       description: "All your transactions & history"        },
   { id: "insights",      label: "AI Insights",       icon: Brain,           group: "AI Intelligence", description: "AI-powered spending patterns"            },
   { id: "subscriptions", label: "Subscriptions AI",  icon: RefreshCw,       group: "AI Intelligence", description: "Detect & manage recurring charges"      },
-  { id: "fraud",         label: "FraudShield",       icon: ShieldAlert,     group: "AI Intelligence", description: "Fraud detection · 12-phase AI stack"    },
+  { id: "fraud",         label: "FraudShield · 12-Phase", icon: ShieldAlert, group: "AI Intelligence", description: "12-phase AI fraud control room · live APIs" },
   { id: "dark-patterns", label: "Dark Patterns",     icon: EyeOff,          group: "AI Intelligence", description: "Spot predatory pricing & dark UX"       },
   { id: "emi",           label: "EMI Tracker",       icon: CreditCard,      group: "Financial OS",    description: "EMI trap detection & schedule"          },
   { id: "festival",      label: "Festivals & Event Planner", icon: Sparkles, group: "Planning",        description: "Budget for Diwali, Holi & more"         },
   { id: "purchase",      label: "Purchase Planner",  icon: ShoppingCart,    group: "Planning",        description: "Plan large purchases with AI help"      },
   { id: "cybersafe-connect", label: "CyberSafe Connect", icon: ShieldCheck, group: "Risk Awareness", description: "Report fraud to Cybercell · 24hr window" },
-  { id: "fraud-shield", label: "FraudShield Vigil", icon: ShieldAlert, group: "Risk Awareness", description: "Mule detection · real-time transaction risk" },
+  { id: "fraud-shield", label: "ChainVault", icon: ShieldAlert, group: "Risk Awareness", description: "India's first consumer fraud-chain prevention (demo)" },
   { id: "settings",      label: "Settings",          icon: Settings,        group: "System",          description: "App preferences & configuration"        },
 ];
 const GROUP_ORDER = ["Workspace", "AI Intelligence", "Financial OS", "Planning", "Risk Awareness", "System"];

@@ -49,7 +49,7 @@ const TransactionsTab = lazy(() => import("./components/app-tabs/TransactionsTab
 const InsightsTab = lazy(() => import("./components/app-tabs/InsightsTab"));
 const TripPlannerPage = lazy(() => import("./pages/AIActions/TripPlannerPage"));
 const CyberSafeConnectPage = lazy(() => import("./pages/RiskAwareness/CyberSafeConnectPage"));
-const FraudShieldVigil = lazy(() => import("./components/FraudShield/index"));
+const ChainVaultPage = lazy(() => import("./components/FraudShield/index"));
 /** Legacy `activeTab === "simulator"` only (sidebar tab removed); renders Insights. */
 const SimulatorTab = lazy(() => import("./components/app-tabs/SimulatorTab"));
 const SettingsTab = lazy(() => import("./components/app-tabs/SettingsTab"));
@@ -95,7 +95,7 @@ const App = () => {
     setSubscriptionsSubView(isSubscriptionFlowConnected(subscriptionOwnerId) ? "hub" : "connect");
   }, [activeTab, subscriptionOwnerId]);
 
-  /** Remove stale `fraudTab` from URL when leaving FraudShield. */
+  /** Remove stale `fraudTab` from URL when leaving 12-phase FraudShield (AI Intelligence). */
   useEffect(() => {
     if (activeTab === "fraud") return;
     try {
@@ -140,31 +140,49 @@ const App = () => {
     }
   }, []);
 
-  /** Deep-link `/fraud-shield` → Risk Awareness FraudShield Vigil page. */
+  /**
+   * Deep-link paths:
+   *   /fraud-shield, /fraud → AI Intelligence · 12-phase FraudShield
+   *   /chain-vault          → Risk Awareness · ChainVault (consumer mock)
+   */
   useEffect(() => {
     try {
       const url = new URL(window.location.href);
       const path = url.pathname.replace(/\/+$/, "") || "/";
-      if (path === "/fraud-shield" || path.endsWith("/fraud-shield")) {
+      if (path === "/chain-vault" || path.endsWith("/chain-vault")) {
         setActiveTab("fraud-shield");
+      } else if (
+        path === "/fraud-shield" ||
+        path.endsWith("/fraud-shield") ||
+        path === "/fraud" ||
+        path.endsWith("/fraud")
+      ) {
+        setActiveTab("fraud");
       }
     } catch {
       /* ignore */
     }
   }, []);
 
-  /** Keep `/fraud-shield` in sync with the Risk Awareness tab. */
+  /** Keep pathname in sync with the active fraud surface. */
   useEffect(() => {
     try {
       const url = new URL(window.location.href);
-      if (activeTab === "fraud-shield") {
+      if (activeTab === "fraud") {
         if (!url.pathname.endsWith("/fraud-shield")) {
           url.pathname = "/fraud-shield";
           window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
         }
         return;
       }
-      if (url.pathname.endsWith("/fraud-shield")) {
+      if (activeTab === "fraud-shield") {
+        if (!url.pathname.endsWith("/chain-vault")) {
+          url.pathname = "/chain-vault";
+          window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+        }
+        return;
+      }
+      if (url.pathname.endsWith("/fraud-shield") || url.pathname.endsWith("/chain-vault")) {
         url.pathname = "/";
         const q = url.searchParams.toString();
         window.history.replaceState({}, "", `${url.pathname}${q ? `?${q}` : ""}${url.hash}`);
@@ -464,7 +482,7 @@ const App = () => {
                 )}
                 {activeTab === "fraud-shield" && (
                   <Suspense fallback={<SkeletonCard lines={4} height={120} />}>
-                    <FraudShieldVigil onNavigate={setActiveTab} />
+                    <ChainVaultPage onNavigate={setActiveTab} />
                   </Suspense>
                 )}
 

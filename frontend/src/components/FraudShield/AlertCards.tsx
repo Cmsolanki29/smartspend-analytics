@@ -2,6 +2,7 @@ import React from "react";
 import { motion, useReducedMotion } from "framer-motion";
 import { ChevronRight } from "lucide-react";
 import type { AlertCardData } from "./mockData";
+import { CHAINVAULT } from "./chainVaultTheme";
 
 const VARIANT_STYLES = {
   critical: {
@@ -27,9 +28,10 @@ const VARIANT_STYLES = {
 type Props = {
   cards: AlertCardData[];
   onCta?: (id: string) => void;
+  premium?: boolean;
 };
 
-export default function AlertCards({ cards, onCta }: Props) {
+export default function AlertCards({ cards, onCta, premium }: Props) {
   const reduce = useReducedMotion();
 
   return (
@@ -51,9 +53,9 @@ export default function AlertCards({ cards, onCta }: Props) {
             transition={{ delay: reduce ? 0 : 0.05 * idx, duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
             className="group w-full rounded-xl p-5 text-left transition-opacity duration-200 hover:opacity-95"
             style={{
-              background: "#1a1d27",
+              background: premium ? CHAINVAULT.cardBgElevated : "#1a1d27",
               border: vs.border,
-              boxShadow: vs.shadow,
+              boxShadow: premium ? `${vs.shadow}, 0 0 32px -16px ${CHAINVAULT.goldGlow}` : vs.shadow,
             }}
           >
             <span
@@ -63,23 +65,38 @@ export default function AlertCards({ cards, onCta }: Props) {
               {c.badge}
             </span>
             <h3 className="mt-3 text-base font-semibold leading-snug text-white">{c.title}</h3>
-            <p className="mt-2 text-sm leading-relaxed" style={{ color: "#8b8fa8" }}>
+            <p className="mt-2 text-sm leading-relaxed" style={{ color: premium ? CHAINVAULT.muted : "#8b8fa8" }}>
               {c.body}
             </p>
-            <motion.div className="mt-4 flex items-end justify-between gap-3">
-              <motion.div>
-                <p className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: "#8b8fa8" }}>
+            <div className="mt-4 flex items-end justify-between gap-3">
+              <div>
+                <p
+                  className="text-[11px] font-semibold uppercase tracking-wide"
+                  style={{ color: premium ? CHAINVAULT.muted : "#8b8fa8" }}
+                >
                   {c.metricLabel}
                 </p>
                 <p className="mt-0.5 text-xl font-semibold tabular-nums text-white">{c.metricValue}</p>
-              </motion.div>
+              </div>
               <span
-                className="inline-flex items-center gap-1 rounded-lg border border-white/15 bg-white/[0.06] px-3 py-2 text-xs font-semibold text-white transition group-hover:bg-white/[0.1]"
+                className={[
+                  "inline-flex items-center gap-1 rounded-lg border px-3 py-2 text-xs font-semibold transition",
+                  premium ? "group-hover:opacity-90" : "border-white/15 bg-white/[0.06] text-white group-hover:bg-white/[0.1]",
+                ].join(" ")}
+                style={
+                  premium
+                    ? {
+                        borderColor: CHAINVAULT.goldBorderSoft,
+                        background: "rgba(212,175,55,0.1)",
+                        color: CHAINVAULT.goldLight,
+                      }
+                    : undefined
+                }
               >
                 {c.ctaLabel}
                 <ChevronRight className="h-3.5 w-3.5 transition group-hover:translate-x-0.5" strokeWidth={1.75} aria-hidden />
               </span>
-            </motion.div>
+            </div>
           </motion.button>
         );
       })}

@@ -1,6 +1,7 @@
-import React, { useState } from "react";
+﻿import React, { useState } from "react";
 import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
 import type { TypologyData, TypologyId } from "./mockData";
+import { CHAINVAULT } from "./chainVaultTheme";
 
 const DOT: Record<string, string> = {
   rose: "#fb7185",
@@ -17,9 +18,10 @@ function riskBarColor(score: number) {
 
 type Props = {
   typologies: TypologyData[];
+  premium?: boolean;
 };
 
-export default function TypologyPanel({ typologies }: Props) {
+export default function TypologyPanel({ typologies, premium }: Props) {
   const reduce = useReducedMotion();
   const [active, setActive] = useState<TypologyId>(typologies[0]?.id ?? "mule-chain");
   const selected = typologies.find((t) => t.id === active) ?? typologies[0];
@@ -28,7 +30,7 @@ export default function TypologyPanel({ typologies }: Props) {
     <section className="mt-6">
       <div className="mb-3 flex items-center justify-between gap-3">
         <h2 className="text-sm font-semibold uppercase tracking-[0.14em] text-white">Fraud typologies</h2>
-        <p className="text-xs" style={{ color: "#8b8fa8" }}>
+        <p className="text-xs" style={{ color: premium ? CHAINVAULT.muted : "#8b8fa8" }}>
           Tap a pattern to inspect indicators
         </p>
       </div>
@@ -43,8 +45,20 @@ export default function TypologyPanel({ typologies }: Props) {
               onClick={() => setActive(t.id)}
               className="min-w-[148px] shrink-0 rounded-xl border p-4 text-left transition"
               style={{
-                background: isActive ? "rgba(124, 58, 237, 0.12)" : "#1a1d27",
-                borderColor: isActive ? "rgba(124, 58, 237, 0.45)" : "rgba(255,255,255,0.06)",
+                background: isActive
+                  ? premium
+                    ? "rgba(212, 175, 55, 0.1)"
+                    : "rgba(124, 58, 237, 0.12)"
+                  : premium
+                    ? CHAINVAULT.cardBgElevated
+                    : "#1a1d27",
+                borderColor: isActive
+                  ? premium
+                    ? CHAINVAULT.goldBorder
+                    : "rgba(124, 58, 237, 0.45)"
+                  : premium
+                    ? CHAINVAULT.goldBorderSoft
+                    : "rgba(255,255,255,0.06)",
               }}
             >
               <p className="text-sm font-semibold text-white">{t.name}</p>
@@ -54,7 +68,7 @@ export default function TypologyPanel({ typologies }: Props) {
                   style={{ width: `${t.riskScore}%`, background: riskBarColor(t.riskScore) }}
                 />
               </div>
-              <p className="mt-2 text-xs tabular-nums" style={{ color: "#8b8fa8" }}>
+              <p className="mt-2 text-xs tabular-nums" style={{ color: premium ? CHAINVAULT.muted : "#8b8fa8" }}>
                 Risk {t.riskScore}/100
               </p>
             </button>
@@ -71,7 +85,10 @@ export default function TypologyPanel({ typologies }: Props) {
             exit={reduce ? undefined : { opacity: 0, y: -6 }}
             transition={{ duration: 0.25 }}
             className="mt-4 grid gap-4 rounded-xl border border-white/[0.06] p-6 lg:grid-cols-2"
-            style={{ background: "#1a1d27" }}
+            style={{
+              background: premium ? CHAINVAULT.cardBgElevated : "#1a1d27",
+              borderColor: premium ? CHAINVAULT.goldBorderSoft : undefined,
+            }}
           >
             <div>
               <h3 className="text-xs font-semibold uppercase tracking-[0.14em]" style={{ color: "#8b8fa8" }}>
