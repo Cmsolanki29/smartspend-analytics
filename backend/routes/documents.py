@@ -457,6 +457,12 @@ async def upload_statement(
                     )
                     result.update(full)
                     result["post_import"] = "inline"
+            try:
+                from services.dashboard_sources import ensure_merged_dashboard_if_multi_source
+
+                ensure_merged_dashboard_if_multi_source(conn, user_id)
+            except Exception:
+                logger.exception("[upload] ensure merged dashboard failed user_id=%s", user_id)
             conn.commit()
         except Exception:
             logger.exception("[upload] post-upload pipeline failed user_id=%s", user_id)
@@ -736,7 +742,28 @@ async def update_dashboard_mode(request: Request, conn=Depends(get_db)):
                 (body.user_id,),
             )
 
+        if mode_n == "merged":
+            cur.execute(
+                """
+                UPDATE connected_sources
+                SET is_visible_on_dashboard = TRUE
+                WHERE user_id = %s AND COALESCE(status, 'active') = 'active'
+                """,
+                (body.user_id,),
+            )
+
     conn.commit()
+
+    if mode_n == "merged":
+        try:
+            from services.transaction_enrichment import sync_all_monthly_summaries_for_user
+
+            sync_all_monthly_summaries_for_user(conn, body.user_id)
+        except Exception:
+            logger.exception(
+                "[dashboard-mode] monthly summary resync failed user_id=%s", body.user_id
+            )
+
     return {"success": True, "mode": mode_n, "visible_source_ids": ids}
 
 

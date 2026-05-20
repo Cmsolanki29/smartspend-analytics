@@ -111,6 +111,13 @@ def run_post_import_pipeline_light(
     """
     summary: dict[str, Any] = {"user_id": user_id, "source_name": source_name, "mode": "light"}
     try:
+        from services.upload_amount_sanity import verify_user_ledger_after_import
+
+        summary["ledger_sanity"] = verify_user_ledger_after_import(conn, user_id)
+    except Exception:
+        logger.exception("ledger sanity check failed user_id=%s", user_id)
+        summary["ledger_sanity"] = {"repaired_rows": 0}
+    try:
         _recalculate_health_score(conn, user_id, date_range)
         summary["health_synced"] = True
     except Exception:

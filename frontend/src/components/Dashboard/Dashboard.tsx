@@ -79,9 +79,29 @@ function SourceBreakdownCard({ userId }: { userId: number }) {
     fetchBreakdown();
   }, [fetchBreakdown]);
 
-  if (loadingBd || !breakdown || breakdown.sources.length === 0) return null;
+  if (loadingBd || !breakdown) return null;
 
   const { sources, total_spend } = breakdown;
+  if (!sources.length) return null;
+
+  const sourceIcon = (type: string) => {
+    if (type === "credit_card") return "💳";
+    if (type === "upi") return "📱";
+    return "🏦";
+  };
+
+  const sourceBarClass = (type: string) => {
+    if (type === "credit_card") return "bg-gradient-to-r from-violet-500 to-purple-600";
+    if (type === "upi") return "bg-gradient-to-r from-emerald-500 to-teal-600";
+    return "bg-gradient-to-r from-cyan-500 to-sky-600";
+  };
+
+  const sourceChipClass = (type: string) => {
+    if (type === "credit_card") return "bg-violet-500/20";
+    if (type === "upi") return "bg-emerald-500/20";
+    return "bg-cyan-500/20";
+  };
+
   const fmt = (n: number) =>
     new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 }).format(n);
 
@@ -97,7 +117,7 @@ function SourceBreakdownCard({ userId }: { userId: number }) {
           <div>
             <p className="font-heading text-3xl font-bold text-white">{fmt(sources[0].spend)}</p>
             <p className="mt-1 text-sm text-white/45">
-              {sources[0].type === "credit_card" ? "💳" : "🏦"} {sources[0].name} — this month
+              {sourceIcon(sources[0].type)} {sources[0].name} — this month
             </p>
           </div>
         </div>
@@ -106,26 +126,23 @@ function SourceBreakdownCard({ userId }: { userId: number }) {
         <div className="space-y-3">
           {sources.map((src) => {
             const pct = total_spend > 0 ? Math.round((src.spend / total_spend) * 100) : 0;
-            const isCard = src.type === "credit_card";
             return (
-              <div key={src.type} className="grid items-center gap-3" style={{ gridTemplateColumns: "140px 1fr 90px" }}>
+              <div
+                key={`${src.type}-${src.name}`}
+                className="grid items-center gap-3"
+                style={{ gridTemplateColumns: "140px 1fr 90px" }}
+              >
                 <div className="flex items-center gap-2 text-sm text-white/70">
                   <span
-                    className={`grid h-6 w-6 shrink-0 place-items-center rounded-md text-sm ${
-                      isCard ? "bg-violet-500/20" : "bg-cyan-500/20"
-                    }`}
+                    className={`grid h-6 w-6 shrink-0 place-items-center rounded-md text-sm ${sourceChipClass(src.type)}`}
                   >
-                    {isCard ? "💳" : "🏦"}
+                    {sourceIcon(src.type)}
                   </span>
                   <span className="truncate">{src.name}</span>
                 </div>
                 <div className="h-2 overflow-hidden rounded-full bg-white/[0.06]">
                   <div
-                    className={`h-full rounded-full transition-all duration-500 ${
-                      isCard
-                        ? "bg-gradient-to-r from-violet-500 to-purple-600"
-                        : "bg-gradient-to-r from-cyan-500 to-sky-600"
-                    }`}
+                    className={`h-full rounded-full transition-all duration-500 ${sourceBarClass(src.type)}`}
                     style={{ width: `${pct}%` }}
                   />
                 </div>
@@ -171,7 +188,7 @@ export default function Dashboard({
   const reduce = useReducedMotion();
   const { user: authUser } = useAuth();
   const { viewMode } = useViewMode();
-  const { spending, trends, health, loading, error, loadWarnings, refetch } = useSmartSpend(
+  const { summary, spending, trends, health, loading, error, loadWarnings, refetch } = useSmartSpend(
     userId,
     month,
     year
@@ -353,10 +370,16 @@ export default function Dashboard({
     if (viewMode === "credit_card_only" && statementSpend != null) {
       return statementSpend;
     }
+    const fromSummary = Number(
+      (summary as { month_spend_inr?: number } | null)?.month_spend_inr ?? 0
+    );
+    if (viewMode === "merged" && fromSummary > 0) {
+      return fromSummary;
+    }
     const fromTrend = Number(trendRow?.expense || 0);
     if (fromTrend > 0) return fromTrend;
     return (Array.isArray(spending) ? spending : []).reduce((acc: number, row: { total_amount?: number }) => acc + Number(row.total_amount || 0), 0);
-  }, [trendRow, spending, viewMode, statementSpend]);
+  }, [trendRow, spending, viewMode, statementSpend, summary]);
 
   const monthIncome = useMemo(() => Number(trendRow?.income || 0), [trendRow]);
 

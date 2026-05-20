@@ -42,9 +42,10 @@ def sync_monthly_summary_for_month(conn, user_id: int, year: int, month: int) ->
     """Recompute monthly_summary from scoped transactions for one calendar month."""
     cur = conn.cursor()
     try:
-        from services.dashboard_scope import fetch_dashboard_mode, transaction_scope_sql
+        from services.dashboard_scope import transaction_scope_sql
+        from services.dashboard_sources import resolve_summary_scope_mode
 
-        mode = fetch_dashboard_mode(cur, user_id)
+        mode = resolve_summary_scope_mode(cur, user_id)
         scope = transaction_scope_sql("t", mode)
         cur.execute(
             f"""

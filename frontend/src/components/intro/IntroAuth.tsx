@@ -15,9 +15,12 @@ import {
   ChangeEvent,
   FormEvent,
   type HTMLAttributes,
+  memo,
   ReactNode,
   useCallback,
+  useDeferredValue,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -117,8 +120,8 @@ function passwordStrength(p: string): 0 | 1 | 2 | 3 | 4 {
 const STRENGTH_LABELS = ["Too short", "Weak", "Fair", "Strong", "Excellent"] as const;
 const STRENGTH_COLORS = ["#374151", "#EF4444", "#F97316", "#22D3EE", "#10B981"];
 
-function StrengthMeter({ password }: { password: string }) {
-  const score = passwordStrength(password);
+const StrengthMeter = memo(function StrengthMeter({ password }: { password: string }) {
+  const score = useMemo(() => passwordStrength(password), [password]);
   return (
     <div className="mt-2.5">
       <div className="flex gap-1.5">
@@ -144,7 +147,7 @@ function StrengthMeter({ password }: { password: string }) {
       </p>
     </div>
   );
-}
+});
 
 /* ============================ Social buttons ============================ */
 
@@ -180,7 +183,7 @@ function ShowcasePanel({ mode, lite }: { mode: AuthMode; lite: boolean }) {
   const staticPreview = lite || Boolean(reduce);
 
   return (
-    <div className="relative h-full w-full overflow-hidden">
+    <div className="relative h-full w-full overflow-hidden transform-gpu">
       {/* Animated mesh-gradient panel */}
       <div
         className={`absolute inset-0 ${staticPreview ? "" : "animate-ss-mesh"} bg-[length:300%_300%]`}
@@ -423,6 +426,7 @@ export function IntroAuth({
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const deferredPassword = useDeferredValue(password);
   const [showPwd, setShowPwd] = useState(false);
 
   const [busy, setBusy] = useState(false);
@@ -445,17 +449,20 @@ export function IntroAuth({
 
   useEffect(() => {
     let cancelled = false;
-    (async () => {
-      const ok = await waitForBackendReady(35000);
-      if (!cancelled) setApiOnline(ok);
-    })();
+    const startId = window.setTimeout(() => {
+      void (async () => {
+        const ok = await waitForBackendReady(28000);
+        if (!cancelled) setApiOnline(ok);
+      })();
+    }, 600);
     const pollId = window.setInterval(async () => {
       if (cancelled) return;
       const ok = await pingBackendHealth(4000);
       if (ok) setApiOnline(true);
-    }, 10000);
+    }, 30000);
     return () => {
       cancelled = true;
+      window.clearTimeout(startId);
       window.clearInterval(pollId);
     };
   }, []);
@@ -532,7 +539,7 @@ export function IntroAuth({
       <div className="relative flex min-h-[100dvh] flex-col lg:flex-row">
         {/* LEFT — showcase (55% on lg, 35vh hero on mobile) */}
         <aside
-          className="relative h-[35vh] min-h-[260px] w-full overflow-hidden lg:h-auto lg:min-h-[100dvh] lg:w-[55%]"
+          className="relative isolate h-[35vh] min-h-[260px] w-full overflow-hidden lg:h-auto lg:min-h-[100dvh] lg:w-[55%]"
           aria-hidden
         >
           <ShowcasePanel mode={mode} lite={authLite} />
@@ -709,7 +716,7 @@ export function IntroAuth({
                     </button>
                   }
                 />
-                {mode === "signup" ? <StrengthMeter password={password} /> : null}
+                {mode === "signup" ? <StrengthMeter password={deferredPassword} /> : null}
               </div>
 
               {/* Submit (morphs on click) */}

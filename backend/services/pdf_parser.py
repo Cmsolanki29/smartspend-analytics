@@ -29,6 +29,7 @@ _CREDIT_NARRATION_HINTS = (
     "rtgs cr",
     "upi from",
     "upi cr",
+    "received from",
     "salary",
     "payroll",
     "reimbursement",
@@ -36,6 +37,18 @@ _CREDIT_NARRATION_HINTS = (
     "int.pd",
     "interest paid",
     "credit interest",
+)
+_DEBIT_NARRATION_HINTS = (
+    "upi/dr",
+    "upi dr",
+    "paid to",
+    "sent to",
+    "payment to",
+    "debited",
+    "debit",
+    "purchase",
+    "withdrawal",
+    "atm wdl",
 )
 _TRANSFER_KEYWORDS = (
     "credit card payment",
@@ -61,6 +74,8 @@ _TRANSFER_KEYWORDS = (
 def _normalise_type(raw: str | None, description: str = "") -> str:
     r = (raw or "").lower().strip()
     combined = f"{r} {description}".lower()
+    if any(k in combined for k in _DEBIT_NARRATION_HINTS):
+        return "DEBIT"
     if any(k in combined for k in _CREDIT_NARRATION_HINTS):
         return "CREDIT"
     if any(k in r for k in _CREDIT_KEYWORDS):
@@ -251,9 +266,24 @@ class PDFParserAgent:
         if parsed.get("validation_issues"):
             validation_issues.extend(parsed["validation_issues"])
 
+        transactions = list(parsed.get("transactions") or [])
+        from services.upload_amount_sanity import sanitize_transactions_before_import
+
+        transactions, sanity_meta = sanitize_transactions_before_import(
+            transactions,
+            text=text,
+            tables=tables,
+            conn=conn,
+            user_id=user_id,
+        )
+        parsed["transactions"] = transactions
+        for warn in sanity_meta.get("warnings") or []:
+            validation_issues.append(warn)
+            logger.info("Upload sanity user_id=%s: %s", user_id, warn)
+
         imported = duplicates = invalid = internal = 0
         if skip_duplicate_check is None:
-            skip_duplicate_check = os.getenv("SMARTSPEND_SKIP_UPLOAD_DEDUP", "1").lower() in (
+            skip_duplicate_check = os.getenv("SMARTSPEND_SKIP_UPLOAD_DEDUP", "0").lower() in (
                 "1",
                 "true",
                 "yes",

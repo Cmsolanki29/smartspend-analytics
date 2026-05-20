@@ -35,7 +35,7 @@ def get_source_breakdown(
         cur.execute(
             f"""
             SELECT
-                COALESCE(cs.source_type, 'bank')            AS source_type,
+                COALESCE(cs.source_type, 'bank')              AS source_type,
                 COALESCE(cs.institution_name, 'Bank Account') AS source_name,
                 COALESCE(
                     SUM(CASE
@@ -43,27 +43,52 @@ def get_source_breakdown(
                              AND COALESCE(t.category, '') != 'internal_transfer'
                         THEN t.amount ELSE 0
                     END), 0
-                )::float                                    AS spend
+                )::float                                      AS spend
             FROM transactions t
-            LEFT JOIN connected_sources cs
-                   ON cs.id = t.connected_source_id AND cs.user_id = t.user_id
+            JOIN connected_sources cs
+              ON cs.id = t.connected_source_id AND cs.user_id = t.user_id
             WHERE t.user_id = %s
               AND ({scope_sql})
               AND t.transaction_date >= DATE_TRUNC('month', CURRENT_DATE)
               AND t.transaction_date  < DATE_TRUNC('month', CURRENT_DATE) + INTERVAL '1 month'
             GROUP BY source_type, source_name
-            HAVING SUM(CASE WHEN t.type = 'DEBIT' THEN t.amount ELSE 0 END) > 0
             ORDER BY spend DESC
             """,
             (user_id,),
         )
+        spend_by_key: dict[tuple[str, str], float] = {}
+        for row in cur.fetchall():
+            key = (str(row[0]), str(row[1]))
+            spend_by_key[key] = float(row[2] or 0)
 
+        # Merged view: list every visible source (including UPI with ₹0 this month).
         sources = []
         total_spend = 0.0
-        for row in cur.fetchall():
-            spend = float(row[2] or 0)
-            sources.append({"type": row[0], "name": row[1], "spend": spend})
-            total_spend += spend
+        if mode == "merged":
+            cur.execute(
+                """
+                SELECT cs.source_type, cs.institution_name
+                FROM connected_sources cs
+                WHERE cs.user_id = %s
+                  AND COALESCE(cs.status, 'active') = 'active'
+                  AND COALESCE(cs.is_visible_on_dashboard, TRUE) = TRUE
+                ORDER BY cs.is_primary DESC, cs.connected_at DESC
+                """,
+                (user_id,),
+            )
+            seen: set[tuple[str, str]] = set()
+            for stype, sname in cur.fetchall():
+                key = (str(stype), str(sname))
+                if key in seen:
+                    continue
+                seen.add(key)
+                spend = spend_by_key.get(key, 0.0)
+                sources.append({"type": key[0], "name": key[1], "spend": spend})
+                total_spend += spend
+        else:
+            for key, spend in spend_by_key.items():
+                sources.append({"type": key[0], "name": key[1], "spend": spend})
+                total_spend += spend
 
         # Detect potential CC bill payments in bank transactions that
         # haven't been marked internal_transfer yet.

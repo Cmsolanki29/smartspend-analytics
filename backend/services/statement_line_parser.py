@@ -140,6 +140,15 @@ def _parse_numeric_date(day_s: str, mon_s: str, year_s: str) -> date | None:
         return None
 
 
+def _repair_running_balance_rows(
+    parsed: list[dict[str, Any]],
+    text: str,
+) -> list[dict[str, Any]]:
+    from services.upload_amount_sanity import repair_running_balance_transactions
+
+    return repair_running_balance_transactions(parsed, text=text)
+
+
 def parse_indian_tabular_statement(text: str) -> list[dict[str, Any]]:
     """
     Parse statement text with numeric dates (``01-02-2026``, ``15/03/24``).
@@ -189,8 +198,8 @@ def parse_indian_tabular_statement(text: str) -> list[dict[str, Any]]:
                 amount, txn_type = withdrawal, "debit"
         elif len(amounts) == 2:
             first, second = amounts[0], amounts[1]
-            # Often: txn amount + running balance (larger second value)
-            if second > first * 3 and first > 0:
+            # Often: txn amount + running balance (second value larger)
+            if second > first * 1.5 and first > 0:
                 amount = first
                 txn_type = _infer_type(narration)
             elif first > 0 and second <= 0:
@@ -201,6 +210,7 @@ def parse_indian_tabular_statement(text: str) -> list[dict[str, Any]]:
                 amount = first
                 txn_type = _infer_type(narration)
         else:
+            # Single trailing number — usually closing balance when W/D columns missing in PDF text.
             amount = amounts[0]
             txn_type = _infer_type(narration)
 
@@ -218,7 +228,7 @@ def parse_indian_tabular_statement(text: str) -> list[dict[str, Any]]:
 
     if len(out) < 5:
         return []
-    return out
+    return _repair_running_balance_rows(out, text)
 
 
 def parse_transactions_from_extraction_tables(tables: list | None) -> list[dict[str, Any]]:
@@ -293,12 +303,12 @@ def best_deterministic_transactions(
     text: str,
     tables: list | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
-    """Pick the richest non-LLM parse (any bank / credit-card statement text)."""
+    """Pick the best non-LLM parse — prefer structured table columns over PDF text lines."""
     candidates: list[tuple[str, list[dict[str, Any]]]] = []
     for name, fn in (
+        ("pdf_tables", lambda: parse_transactions_from_extraction_tables(tables)),
         ("indian_tabular", lambda: parse_indian_tabular_statement(text)),
         ("axis_line", lambda: parse_axis_style_statement(text)),
-        ("pdf_tables", lambda: parse_transactions_from_extraction_tables(tables)),
     ):
         try:
             rows = fn()
@@ -308,5 +318,20 @@ def best_deterministic_transactions(
             continue
     if not candidates:
         return [], "none"
-    best_name, best_rows = max(candidates, key=lambda x: len(x[1]))
+
+    from services.upload_amount_sanity import amounts_look_like_running_balances
+
+    by_name = {name: rows for name, rows in candidates}
+    table_rows = by_name.get("pdf_tables") or []
+    line_rows = by_name.get("indian_tabular") or by_name.get("axis_line") or []
+
+    if table_rows and not amounts_look_like_running_balances(table_rows):
+        return table_rows, "pdf_tables"
+    if table_rows and line_rows and amounts_look_like_running_balances(line_rows):
+        if not amounts_look_like_running_balances(table_rows):
+            return table_rows, "pdf_tables"
+
+    sane = [(n, r) for n, r in candidates if not amounts_look_like_running_balances(r)]
+    pool = sane if sane else candidates
+    best_name, best_rows = max(pool, key=lambda x: len(x[1]))
     return best_rows, best_name

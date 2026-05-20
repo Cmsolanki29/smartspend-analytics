@@ -30,10 +30,20 @@ def _trends_rows_need_transaction_fallback(trends: list[MonthlyTrend]) -> bool:
     return all(_z(t.income) and _z(t.expense) for t in trends)
 
 
-def _needs_scoped_transaction_trends(cur, user_id: int) -> bool:
-    """Use live scoped txn aggregation when summary is empty/stale or dashboard is filtered."""
-    mode = fetch_dashboard_mode(cur, user_id)
+def _needs_scoped_transaction_trends(cur, user_id: int, scope: str | None = None) -> bool:
+    """
+    Use live scoped txn aggregation when summary is empty/stale, dashboard is filtered,
+    or the user has multiple linked source types (e.g. UPI + credit card).
+
+    Cached ``monthly_summary`` rows are often built before a second source is uploaded;
+    sticking to that cache in merged mode hides UPI/bank spend after card onboarding.
+    """
+    mode = resolve_scope_mode(cur, user_id, scope)
     if mode != "merged":
+        return True
+    from services.dashboard_sources import user_has_multi_source_types
+
+    if user_has_multi_source_types(cur, user_id):
         return True
     cur.execute(
         """
@@ -241,7 +251,9 @@ def monthly_trends(
                 )
             )
         summary_series = list(reversed(out))
-        if _trends_rows_need_transaction_fallback(summary_series) or _needs_scoped_transaction_trends(cur, user_id):
+        if _trends_rows_need_transaction_fallback(summary_series) or _needs_scoped_transaction_trends(
+            cur, user_id, scope
+        ):
             return _monthly_trends_from_transactions(cur, user_id, scope)
         return summary_series
     except Exception as e:
