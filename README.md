@@ -2,7 +2,8 @@
 
 ### AI-driven financial insights and risk monitoring
 
-[![EXIQO Code-AI-Thon](https://img.shields.io/badge/Event-EXIQO%20Code--AI--Thon-7c3aed?style=for-the-badge)](https://github.com/Cmsolanki29/smartspend-analytics)
+[![EXIQO Code-AI-Thon](https://img.shields.io/badge/Event-EXIQO%20Code--AI--Thon-7c3aed?style=for-the-badge)](https://github.com/Cmsolanki29/final-exiqo)
+[![Repository](https://img.shields.io/badge/GitHub-final--exiqo-181717?style=flat-square&logo=github)](https://github.com/Cmsolanki29/final-exiqo)
 [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://python.org)
 [![React](https://img.shields.io/badge/React-18-61DAFB?style=flat-square&logo=react&logoColor=black)](https://reactjs.org)
 [![FastAPI](https://img.shields.io/badge/FastAPI-API-009688?style=flat-square&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
@@ -257,8 +258,8 @@ Do **not** use legacy `database/schema.sql` only — migrations in `backend/data
 **Terminal 1 — API**
 
 ```bash
-git clone https://github.com/Cmsolanki29/smartspend-analytics.git
-cd smartspend-analytics
+git clone https://github.com/Cmsolanki29/final-exiqo.git
+cd final-exiqo
 cp .env.example .env
 # edit .env
 
@@ -372,7 +373,7 @@ Redeploy backend after Vercel URL is known (CORS).
 ## Project structure
 
 ```
-smartspend-analytics/
+final-exiqo/
 ├── backend/           # FastAPI, ML, migrations, scripts/
 ├── frontend/          # React CRA, setupProxy → :8002
 ├── test samples/      # Demo PDFs
@@ -417,5 +418,5 @@ MIT — replace with your team’s license and acknowledgements (OpenAI, Groq, G
 <p align="center">
   <a href="SETUP.md">Setup guide</a> ·
   <a href="SMARTSPEND_PROJECT_OVERVIEW.md">Full product overview</a> ·
-  <a href="https://github.com/Cmsolanki29/smartspend-analytics">GitHub</a>
+  <a href="https://github.com/Cmsolanki29/final-exiqo">GitHub</a>
 </p>

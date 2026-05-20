@@ -323,9 +323,12 @@ Return ONLY JSON array of {len(batch)} category strings in order."""
 
     def read_image_as_text(self, image_base64: str, mime_type: str = "image/png") -> str:
         prompt = (
-            "Extract ALL text from this financial document image exactly as shown. "
-            "Include every number, date, amount, and description. Preserve table structure."
+            "Extract ALL text from this financial image exactly as shown.\n"
+            "It may be a UPI payment screenshot, bank SMS, passbook photo, or statement scan.\n"
+            "Include: date, time, amount (₹), paid to / merchant, UPI ID, transaction ID, "
+            "account last digits, balance if visible. One line per field. No commentary."
         )
+        min_chars = 15
 
         if "gemini" in self.providers:
             try:
@@ -339,7 +342,7 @@ Return ONLY JSON array of {len(batch)} category strings in order."""
                 )
                 text = (response.text or "").strip()
                 elapsed = time.time() - start
-                if len(text) > 50:
+                if len(text) >= min_chars:
                     self._log_call("gemini", self.providers["gemini"]["model_name"], "vision_read", elapsed, len(text))
                     return text
             except Exception as exc:
@@ -367,7 +370,7 @@ Return ONLY JSON array of {len(batch)} category strings in order."""
                 )
                 text = (response.choices[0].message.content or "").strip()
                 elapsed = time.time() - start
-                if len(text) > 50:
+                if len(text) >= min_chars:
                     self._log_call("openai", vision_model, "vision_read", elapsed, len(text))
                     return text
             except Exception as exc:

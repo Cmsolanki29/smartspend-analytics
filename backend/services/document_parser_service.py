@@ -9,11 +9,13 @@ from __future__ import annotations
 import io
 import json
 import logging
+import os
 import re
 from typing import Any
 
 from services.ai_llm_provider import get_chat_client, get_chat_model, preferred_provider
 from services.llm_router import get_llm_router
+from services.statement_line_parser import best_deterministic_transactions
 
 logger = logging.getLogger(__name__)
 
@@ -213,37 +215,15 @@ def _normalize_deterministic_transactions(tables: list) -> list[dict[str, Any]]:
     return out
 
 
-def classify_and_extract_monster(
+def _agentic_first_enabled() -> bool:
+    return os.getenv("SMARTSPEND_AGENTIC_FIRST", "1").lower() in ("1", "true", "yes")
+
+
+def _run_agentic_llm_pipeline(
+    router: Any,
     text: str,
-    filename: str = "",
-    tables: list | None = None,
 ) -> dict[str, Any]:
-    """Chunked extraction with validation and Indian category taxonomy."""
-    deterministic = _normalize_deterministic_transactions(tables or [])
-    if deterministic:
-        categorized = _categorize_transactions_llm(deterministic)
-        return {
-            "institution": "",
-            "document_type": "bank_statement",
-            "date_range": None,
-            "transactions": categorized,
-            "total_extracted": len(categorized),
-            "method": "deterministic",
-            "llm_model": None,
-        }
-
-    router = get_llm_router(required=True)
-    if router is None:
-        return {
-            "institution": "unknown",
-            "document_type": "other",
-            "date_range": None,
-            "transactions": [],
-            "total_extracted": 0,
-            "method": "none",
-            "llm_model": None,
-        }
-
+    """Groq/Gemini agentic path: understand → chunked extract → validate → categorize."""
     doc_info = router.understand_document(text[:8000])
     transactions = _extract_with_router(router, text, doc_info)
 
@@ -267,6 +247,75 @@ def classify_and_extract_monster(
     }
 
 
+def _fallback_deterministic_extract(
+    text: str,
+    tables: list | None,
+) -> dict[str, Any]:
+    """Monster-style fallback — pdfplumber text + line parser, no LLM."""
+    det_rows, det_method = best_deterministic_transactions(text, tables)
+    if det_rows:
+        return {
+            "institution": "",
+            "document_type": "bank_statement",
+            "date_range": None,
+            "transactions": det_rows,
+            "total_extracted": len(det_rows),
+            "method": det_method,
+            "llm_model": None,
+            "validation_issues": [],
+        }
+    return {
+        "institution": "unknown",
+        "document_type": "other",
+        "date_range": None,
+        "transactions": [],
+        "total_extracted": 0,
+        "method": "none",
+        "llm_model": None,
+        "validation_issues": [],
+    }
+
+
+def classify_and_extract_monster(
+    text: str,
+    filename: str = "",
+    tables: list | None = None,
+    *,
+    agentic_first: bool | None = None,
+) -> dict[str, Any]:
+    """
+    Transaction extraction.
+
+    Default (``SMARTSPEND_AGENTIC_FIRST=1``): agentic LLM first, then deterministic fallback.
+    When ``agentic_first=False``: legacy speed path (deterministic tables → LLM if needed).
+    """
+    use_agentic = _agentic_first_enabled() if agentic_first is None else bool(agentic_first)
+
+    if not use_agentic:
+        deterministic = _normalize_deterministic_transactions(tables or [])
+        if deterministic:
+            categorized = _categorize_transactions_llm(deterministic)
+            return {
+                "institution": "",
+                "document_type": "bank_statement",
+                "date_range": None,
+                "transactions": categorized,
+                "total_extracted": len(categorized),
+                "method": "deterministic",
+                "llm_model": None,
+                "validation_issues": [],
+            }
+
+    router = get_llm_router(required=False)
+    if router is not None:
+        try:
+            return _run_agentic_llm_pipeline(router, text)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Agentic LLM pipeline failed (%s); using deterministic fallback", exc)
+
+    return _fallback_deterministic_extract(text, tables)
+
+
 def _extract_with_router(
     router: Any,
     text: str,
@@ -280,14 +329,22 @@ def _extract_with_router(
     overlap = 500
     chunks: list[str] = []
     start = 0
-    while start < len(text):
+    max_chunks = max(1, (len(text) // max(1, chunk_size - overlap)) + 2)
+    iterations = 0
+    while start < len(text) and iterations < max_chunks:
+        iterations += 1
         end = min(start + chunk_size, len(text))
         if end < len(text):
             newline = text.rfind("\n", start + chunk_size - overlap, end)
             if newline > start:
                 end = newline
+        if end <= start:
+            end = min(start + chunk_size, len(text))
         chunks.append(text[start:end])
-        start = end - overlap if end < len(text) else end
+        next_start = end - overlap if end < len(text) else end
+        if next_start <= start:
+            next_start = end
+        start = next_start
 
     all_transactions: list[dict[str, Any]] = []
     seen_keys: set[str] = set()

@@ -16,6 +16,8 @@ import {
 import { useAuth } from "../context/AuthContext";
 import { useSubscriptionIntelligence } from "../context/SubscriptionIntelligenceContext";
 import { persistMigrations } from "../services/subscriptionIntelligence";
+import { syncLinkedAppsToBackend } from "../services/subscriptionDeviceSync";
+import { getSubscriptionFlowState } from "../utils/subscriptionFlowStorage";
 import { useToast } from "../components/common/Toast";
 import { SkeletonCard } from "../components/common/SkeletonCard";
 import { PageHeader } from "../components/Dashboard/shared/PageHeader";
@@ -96,6 +98,12 @@ export default function SubscriptionIntelligence({ onOpenReminders }) {
   const handleRefresh = useCallback(async () => {
     setRefreshing(true);
     try {
+      if (userId) {
+        const flow = getSubscriptionFlowState(userId);
+        if (flow.connected && flow.apps?.length) {
+          await syncLinkedAppsToBackend(userId);
+        }
+      }
       await refreshAll();
       showToast("Analysis refreshed", "success");
     } catch (e) {
@@ -103,7 +111,7 @@ export default function SubscriptionIntelligence({ onOpenReminders }) {
     } finally {
       setRefreshing(false);
     }
-  }, [refreshAll, showToast]);
+  }, [userId, refreshAll, showToast]);
 
   const handleScheduleReminders = useCallback(async () => {
     setScheduling(true);
@@ -199,31 +207,56 @@ export default function SubscriptionIntelligence({ onOpenReminders }) {
           </div>
           <div>
             <h2 className="font-heading text-lg font-semibold text-white">Savings dashboard</h2>
-            <p className="text-sm text-white/55">Money saved when you cancelled or stopped paying for unused subscriptions.</p>
+            <p className="text-sm text-white/55">
+              Realized savings from cancellations plus live waste flagged on your linked apps (matches Possible savings).
+            </p>
           </div>
         </div>
         {savingsLoading && !savings ? (
           <SkeletonCard lines={2} height={72} />
         ) : savings ? (
           <div className="grid gap-3 sm:grid-cols-3">
-            <StatTile
-              label="This month"
-              value={inr(savings.this_month?.amount_saved_inr)}
-              hint={`${savings.this_month?.subscriptions_cancelled || 0} cancelled`}
-              ring="emerald"
-            />
-            <StatTile
-              label="This year"
-              value={inr(savings.this_year?.amount_saved_inr)}
-              hint={`${savings.this_year?.subscriptions_cancelled || 0} cancelled`}
-              ring="cyan"
-            />
-            <StatTile
-              label="All time"
-              value={inr(savings.all_time?.amount_saved_inr)}
-              hint={`${savings.all_time?.subscriptions_cancelled || 0} total`}
-              ring="purple"
-            />
+            {(() => {
+              const realized = Number(savings.this_month?.amount_saved_inr || 0);
+              const flagged = Number(savings.this_month?.waste_prevented_monthly_inr || 0);
+              const cancelled = savings.this_month?.subscriptions_cancelled || 0;
+              const monthPrimary =
+                Number(savings.this_month?.total_impact_monthly_inr) ||
+                realized + flagged;
+              const monthHint =
+                realized > 0
+                  ? `${cancelled} cancelled · ${inr(flagged)} flagged`
+                  : flagged > 0
+                    ? `${savings.at_risk_subscriptions ?? s?.at_risk_count ?? 0} at-risk · not cancelled yet`
+                    : `${cancelled} cancelled`;
+              const ytdRealized = Number(savings.this_year?.amount_saved_inr || 0);
+              const ytdFlagged = Number(savings.this_year?.waste_prevented_yearly_inr || 0);
+              const ytdPrimary =
+                Number(savings.this_year?.total_impact_yearly_inr) ||
+                ytdRealized + ytdFlagged;
+              return (
+                <>
+                  <StatTile
+                    label="This month"
+                    value={inr(monthPrimary)}
+                    hint={monthHint}
+                    ring="emerald"
+                  />
+                  <StatTile
+                    label="This year"
+                    value={inr(ytdPrimary)}
+                    hint={`${inr(ytdRealized)} realized · ${inr(ytdFlagged)} flagged /yr`}
+                    ring="cyan"
+                  />
+                  <StatTile
+                    label="All time"
+                    value={inr(savings.all_time?.amount_saved_inr)}
+                    hint={`${savings.all_time?.subscriptions_cancelled || 0} cancelled (realized)`}
+                    ring="purple"
+                  />
+                </>
+              );
+            })()}
           </div>
         ) : (
           <p className="text-sm text-white/55">No savings rows yet — data appears after cancellations are recorded.</p>

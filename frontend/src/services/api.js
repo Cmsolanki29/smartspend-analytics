@@ -2,7 +2,8 @@ import axios from "axios";
 import { getApiBaseUrl, getBackendRootUrl, getDevBackendHint, getDevHealthUrl } from "./apiBaseUrl";
 
 /** Long-running AI insight bundle (parallel Groq/OpenAI calls). */
-export const INSIGHTS_FETCH_MS = 42000;
+/** Must exceed backend insights-stream LLM deadline (~90s) + build_user_data; else UI aborts early. */
+export const INSIGHTS_FETCH_MS = 100000;
 /** Dashboard charts + scoped SQL — must exceed cold-start / merged-scope queries. */
 export const DASHBOARD_FETCH_MS = 45000;
 
@@ -499,13 +500,30 @@ export const getHealthScore = async (userId, month, year, scope = null) => {
   );
 };
 
+/** Recalculate + persist health after EMI / planner / festival mutations. */
+export const refreshHealthScore = async (userId, month, year, scope = null) => {
+  const params = { month, year };
+  if (scope) params.scope = scope;
+  return request(
+    api.post(`/health-score/${userId}/refresh`, null, { params, timeout: DASHBOARD_FETCH_MS })
+  );
+};
+
 export const getHealthHistory = async (userId) =>
   request(api.get(`/health-score/${userId}/history`));
 
-export const getInsights = async (userId, month, year) =>
-  request(
-    api.get(`/insights/${userId}`, { params: { month, year }, timeout: INSIGHTS_FETCH_MS })
-  );
+export const getInsights = async (userId, month, year, scope = null) => {
+  const params = { month, year };
+  if (scope) params.scope = scope;
+  return request(api.get(`/insights/${userId}`, { params, timeout: INSIGHTS_FETCH_MS }));
+};
+
+/** Fast JSON insights (cached rule-based) — preferred for first paint on AI Insights tab. */
+export const getInsightsFast = async (userId, month, year, scope = null) => {
+  const params = { month, year };
+  if (scope) params.scope = scope;
+  return request(api.get(`/insights/${userId}`, { params, timeout: 28000 }));
+};
 
 /**
  * Streams GET /insights/{userId}/insights-stream (SSE). Invokes onEvent for each parsed JSON object.
@@ -638,6 +656,25 @@ export const getEmiReport = async (userId, scope = null) => {
 };
 
 export const scanEmi = async (userId) => request(api.post(`/emi/${userId}/scan`));
+
+export const deactivateEmiRecord = async (userId, { merchant, amount, dismiss_key } = {}) =>
+  request(
+    api.patch(`/emi/${userId}/record/deactivate`, {
+      merchant,
+      amount: amount != null ? Number(amount) : undefined,
+      dismiss_key: dismiss_key || undefined,
+    })
+  );
+
+export const deleteFestivalPlan = async (userId, festivalName, festivalDate) =>
+  request(
+    api.delete(`/festivals/${userId}/plan`, {
+      params: {
+        festival_name: festivalName,
+        festival_date: String(festivalDate || "").slice(0, 10),
+      },
+    })
+  );
 
 /** Standard loan EMI + amortization (reducing-balance formula). */
 export const postLoanCalculate = async (userId, payload) =>

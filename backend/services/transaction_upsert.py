@@ -25,8 +25,14 @@ def enrich_transaction_row(
     )
     merchant_s = str(merchant).strip()[:200] or "Unknown"
     row[merchant_key] = merchant_s
-    row[category_key] = stored_category_for_merchant(
-        merchant_s, row.get(category_key)
-    )
-    row["normalized_merchant"] = merchant_prefix_key(merchant_s)
+    try:
+        row[category_key] = stored_category_for_merchant(
+            merchant_s, row.get(category_key)
+        )
+    except Exception:  # noqa: BLE001 — never fail an entire upload on categorization
+        row[category_key] = "Others"
+    try:
+        row["normalized_merchant"] = merchant_prefix_key(merchant_s)
+    except Exception:  # noqa: BLE001
+        row["normalized_merchant"] = "unknown"
     return row

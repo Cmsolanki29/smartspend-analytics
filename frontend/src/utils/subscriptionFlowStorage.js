@@ -1,4 +1,25 @@
 const key = (userId) => `ss_subscription_flow_${Number(userId) || 0}`;
+const visitedKey = (userId) => `smartspend:subs-tab-visited-${Number(userId) || 0}`;
+
+/** User opened Subscriptions AI at least once (per browser). */
+export function hasVisitedSubscriptionsTab(userId) {
+  try {
+    return window.localStorage.getItem(visitedKey(userId)) === "1";
+  } catch {
+    return false;
+  }
+}
+
+export function markSubscriptionsTabVisited(userId) {
+  try {
+    window.localStorage.setItem(visitedKey(userId), "1");
+    window.dispatchEvent(
+      new CustomEvent("smartspend:subs-tab-visited", { detail: { userId: Number(userId) || 0 } })
+    );
+  } catch {
+    /* ignore */
+  }
+}
 
 /**
  * @returns {{ connected: boolean, apps: string[], grantedAt: string | null }}

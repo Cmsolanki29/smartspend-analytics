@@ -77,15 +77,19 @@ def enrich_category(merchant: str) -> str:
 
 
 def stored_category_for_merchant(merchant: str, raw_category: str | None = None) -> str:
-    """Category written to transactions — enrich first, then legacy fallbacks."""
+    """Category written to transactions — enrich first, then legacy fallbacks.
+
+    Must not call ``categorizer.resolve_category`` (that delegates here and caused
+    RecursionError on every upload when LLM/parser supplied a raw category).
+    """
     label = enrich_category(merchant)
     stored = ENRICH_TO_STORED.get(label, "Others")
     if stored != "Others":
         return stored
     if raw_category and str(raw_category).strip():
-        from services.categorizer import resolve_category
+        from services.categorizer import normalize_category
 
-        return resolve_category(merchant, raw_category)
-    from services.categorizer import categorize_merchant
+        return normalize_category(raw_category)
+    from services.categorizer import categorize_merchant, normalize_category
 
-    return categorize_merchant(merchant) or "Others"
+    return normalize_category(categorize_merchant(merchant))

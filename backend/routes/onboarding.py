@@ -7,8 +7,8 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
-from db import get_connection
-from utils.auth import decode_token
+from db import get_connection, get_db
+from utils.auth import decode_token, get_current_user_id
 
 router = APIRouter(prefix="/onboarding", tags=["Onboarding"])
 optional_bearer = HTTPBearer(auto_error=False)
@@ -27,6 +27,13 @@ class LinkBankRequest(BaseModel):
     bank_name: str | None = None
     bank_slug: str | None = None
     mobile_number: str
+
+
+class LinkBankDemoRequest(BaseModel):
+    """Instant bank link using pre-built ghost transaction pool (signup path)."""
+    bank_slug: str
+    bank_name: str | None = None
+    account_last4: str | None = None
 
 
 def _resolve_user_id(payload_user_id: int | None, credentials: HTTPAuthorizationCredentials | None) -> int:
@@ -155,43 +162,25 @@ async def link_bank(
         cur.execute("SELECT COUNT(*) FROM transactions WHERE user_id = %s", (user_id,))
         existing_user_txns = int(cur.fetchone()[0])
 
-        cur.execute(
-            """
-            SELECT COUNT(*) FROM transactions
-            WHERE user_id = 1 OR user_id IS NULL
-            """
-        )
-        available_count = int(cur.fetchone()[0])
+        actual_assigned = 0
+        if existing_user_txns < 200:
+            try:
+                from services.indian_fintech_seed.assign import assign_corpus_to_user
 
-        # Signup seeds 1000+ demo txns; only pull from the shared pool if this user still needs more.
-        if existing_user_txns >= 1000:
-            transactions_to_assign = 0
-        else:
-            need = max(0, 1000 - existing_user_txns)
-            transactions_to_assign = min(need, random.randint(600, 800))
-            if available_count <= 0:
-                transactions_to_assign = 0
-            elif transactions_to_assign > available_count:
-                transactions_to_assign = available_count
-
-        if transactions_to_assign > 0:
-            cur.execute(
-                """
-                UPDATE transactions
-                SET user_id = %s
-                WHERE id IN (
-                    SELECT id
-                    FROM transactions
-                    WHERE user_id = 1 OR user_id IS NULL
-                    ORDER BY RANDOM()
-                    LIMIT %s
+                actual_assigned = assign_corpus_to_user(
+                    cur, user_id, count=random.randint(800, 1200)
                 )
-                """,
-                (user_id, transactions_to_assign),
-            )
-            actual_assigned = cur.rowcount if cur.rowcount is not None else 0
-        else:
-            actual_assigned = 0
+            except Exception:
+                actual_assigned = 0
+            if actual_assigned < 200:
+                try:
+                    from services.new_user_transaction_seed import ensure_user_has_transactions
+
+                    actual_assigned = ensure_user_has_transactions(
+                        cur, user_id, min_count=max(200, 1000 - existing_user_txns)
+                    )
+                except Exception:
+                    actual_assigned = 0
 
         cur.execute(
             """
@@ -221,16 +210,88 @@ async def link_bank(
         conn.close()
 
 
+@router.post("/link-bank-demo")
+async def link_bank_demo(
+    body: LinkBankDemoRequest,
+    jwt_user_id: int = Depends(get_current_user_id),
+    conn=Depends(get_db),
+) -> dict[str, Any]:
+    """
+    Signup bank linking: any bank choice gets a lifestyle pool relabeled to that bank.
+    """
+    from services.signup_bank_ghost_pool import link_signup_bank_ghost
+
+    slug = (body.bank_slug or "").strip().upper()
+    if not slug and not (body.bank_name or "").strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="bank_slug or bank_name is required",
+        )
+
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT name FROM users WHERE id = %s", (jwt_user_id,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        display_name = (row[0] or "You").strip() or "You"
+
+        result = link_signup_bank_ghost(
+            conn,
+            cur,
+            user_id=jwt_user_id,
+            bank_slug=slug,
+            bank_name=body.bank_name,
+            display_name=display_name,
+            account_last4=body.account_last4,
+        )
+        conn.commit()
+        try:
+            from services.fraud_batch_scorer import schedule_fraud_batch_score
+
+            schedule_fraud_batch_score(jwt_user_id)
+        except Exception:
+            pass
+        return result
+    except ValueError as exc:
+        conn.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except Exception as exc:
+        conn.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Could not link demo bank data",
+        ) from exc
+    finally:
+        cur.close()
+
+
+@router.get("/ghost-pool-summary")
+async def ghost_pool_summary() -> dict[str, Any]:
+    """Summary table of seven signup ghost pools (for docs / demo)."""
+    from services.signup_bank_ghost_pool import SIGNUP_GHOST_PROFILES, ghost_pool_summary
+
+    return {
+        "count": len(SIGNUP_GHOST_PROFILES),
+        "pool_user_id_range": "900001–900007",
+        "bank_free": True,
+        "note": "Any bank slug/name works; pools are lifestyle templates only.",
+        "profiles": ghost_pool_summary(),
+    }
+
+
 @router.get("/banks")
 async def get_banks() -> dict[str, list[dict[str, str]]]:
     """Get available banks (requested endpoint)."""
     return {
         "banks": [
-            {"id": "HDFC Bank", "name": "HDFC Bank", "logo": "🏦"},
-            {"id": "State Bank of India", "name": "State Bank of India", "logo": "🏛️"},
-            {"id": "ICICI Bank", "name": "ICICI Bank", "logo": "🏢"},
-            {"id": "Axis Bank", "name": "Axis Bank", "logo": "🏪"},
-            {"id": "Kotak Mahindra", "name": "Kotak Mahindra", "logo": "🏬"},
+            {"id": "HDFC", "name": "HDFC Bank", "logo": "🏦"},
+            {"id": "SBI", "name": "State Bank of India", "logo": "🏛️"},
+            {"id": "ICICI", "name": "ICICI Bank", "logo": "🏢"},
+            {"id": "AXIS", "name": "Axis Bank", "logo": "🏪"},
+            {"id": "KOTAK", "name": "Kotak Mahindra", "logo": "🏬"},
+            {"id": "PNB", "name": "Punjab National Bank", "logo": "🏦"},
+            {"id": "BOB", "name": "Bank of Baroda", "logo": "🏛️"},
         ]
     }
 

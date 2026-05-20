@@ -83,32 +83,6 @@ function UserBubble({ content, timestamp }) {
   );
 }
 
-// ── System notice bubble (identity warning + optional Connect Account button) ──
-function SystemNoticeBubble({ content, timestamp, showConnectButton, onConnect }) {
-  return (
-    <div className="mb-3 flex justify-center" style={{ animation: "ss-fade-up 0.22s ease-out both" }}>
-      <div className="max-w-[92%] rounded-xl border border-amber-500/35 bg-amber-500/12 px-4 py-3 text-xs leading-relaxed text-amber-100">
-        {content}
-        <span className="mt-1 block text-[10px] text-amber-200/50">{fmt(timestamp)}</span>
-        {showConnectButton && (
-          <button
-            type="button"
-            onClick={onConnect}
-            className="mt-2.5 inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold text-amber-100 transition-all hover:-translate-y-0.5 active:scale-95"
-            style={{
-              background: "linear-gradient(135deg,rgba(217,119,6,0.30),rgba(245,158,11,0.18))",
-              border: "1px solid rgba(245,158,11,0.45)",
-              boxShadow: "0 2px 8px rgba(217,119,6,0.2)",
-            }}
-          >
-            Connect Account →
-          </button>
-        )}
-      </div>
-    </div>
-  );
-}
-
 function AiBubble({ content, onChipClick, onNavigateRoute, isStreaming, timestamp }) {
   const { clean, routes, chips } = parseMessage(content);
 
@@ -244,8 +218,33 @@ const LIMITED_FEATURE_BUTTONS = [
 
 function featureButtonsForScope(scope) {
   if (scope === "linked_full") return FULL_FEATURE_BUTTONS;
-  if (scope === "unlinked_same_bank") return LIMITED_FEATURE_BUTTONS;
+  if (scope === "unlinked_same_bank" || scope === "unlinked_foreign") return LIMITED_FEATURE_BUTTONS;
   return [];
+}
+
+function buildUploadAssistantReply({ firstName, inst, txCount, scope, warningMessage }) {
+  const routeSettings = 'ROUTE:{"label":"Connect your account →","path":"/settings","tab":"settings"}';
+  const chips = "CHIPS:About my linked account|My savings rate|Unusual in this file";
+  if (txCount <= 0) {
+    return (
+      `Hey ${firstName}, I couldn't pull transactions from that image — screenshots are often hard to read. ` +
+      `Try a **PDF or CSV bank statement** for best results, or ask about your **linked account** below.\n\n` +
+      `${routeSettings}\n\n${chips}`
+    );
+  }
+  if (scope === "linked_full") {
+    return (
+      `Hey ${firstName}! I've parsed your **${inst}** statement — **${txCount}** transactions ready. ` +
+      `Tap a quick action below or ask me anything.\n\n` +
+      `CHIPS:Where I spend most|Any unusual txns?|My savings rate`
+    );
+  }
+  const note =
+    warningMessage ||
+    (scope === "unlinked_same_bank"
+      ? `Hey ${firstName}, this looks like your **${inst}** statement but that bank isn't linked yet — I'll answer from this file only.`
+      : `Hey ${firstName}, this file doesn't match your profile name — I'll give a **short preview** of it only. For your real finances, use your linked account.`);
+  return `${note}\n\n${routeSettings}\n\n${chips}`;
 }
 
 // ── Main component ─────────────────────────────────────────────────────────
@@ -269,7 +268,7 @@ export default function SmartSpendChatbot({ onNavigate, month, year, dashboardSc
   const [uploadedDocMeta, setUploadedDocMeta] = useState(null);
   const [docContext, setDocContext] = useState(null);
   const [featureButtons, setFeatureButtons] = useState([]);
-  const [identityScope, setIdentityScope] = useState(null);
+  const [, setIdentityScope] = useState(null);
   const bottomRef = useRef(null);
   const fileRef = useRef(null);
   const hasUserMessagedRef = useRef(false);
@@ -302,9 +301,9 @@ export default function SmartSpendChatbot({ onNavigate, month, year, dashboardSc
     setMessages((prev) => [
       ...prev,
       {
-        id: `sys-mode-${Date.now()}`,
-        role: "system",
-        content: `Switched to ${dashboardModeLabel} view. How can I help, ${firstName}?`,
+        id: `ai-mode-${Date.now()}`,
+        role: "assistant",
+        content: `Switched to **${dashboardModeLabel}** view. How can I help, ${firstName}?`,
         timestamp: Date.now(),
       },
     ]);
@@ -331,6 +330,26 @@ export default function SmartSpendChatbot({ onNavigate, month, year, dashboardSc
         if (cancelled) return;
         setSessionId(data.session_id);
         setLlmOnline(data.llm?.status !== "offline");
+        if (data.session_id) {
+          try {
+            const histRes = await fetch(`/api/ai/session/${data.session_id}/messages`, {
+              headers: authHeaders(),
+            });
+            if (histRes.ok) {
+              const hist = await histRes.json();
+              const restored = (hist.messages || []).map((m, i) => ({
+                id: `hist-${i}-${m.timestamp || Date.now()}`,
+                role: m.role,
+                content: m.content,
+                timestamp: m.timestamp ? new Date(m.timestamp).getTime() : Date.now(),
+              }));
+              if (restored.length > 0) {
+                setMessages(restored);
+                hasUserMessagedRef.current = true;
+              }
+            }
+          } catch { /* non-fatal */ }
+        }
       } catch { /* non-fatal */ }
     }
     init();
@@ -375,7 +394,14 @@ export default function SmartSpendChatbot({ onNavigate, month, year, dashboardSc
           window.clearTimeout(tid);
         }
 
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        if (!res.ok) {
+          let detail = `Request failed (${res.status})`;
+          try {
+            const errBody = await res.json();
+            detail = errBody.detail || errBody.message || detail;
+          } catch { /* ignore */ }
+          throw new Error(detail);
+        }
 
         const reader = res.body.getReader();
         const dec = new TextDecoder();
@@ -419,12 +445,16 @@ export default function SmartSpendChatbot({ onNavigate, month, year, dashboardSc
             return { ...m, streaming: false };
           })
         );
-      } catch {
+      } catch (err) {
+        const msg =
+          err?.name === "AbortError"
+            ? "That took too long — please try a shorter question."
+            : err?.message?.includes("503")
+              ? "AI is offline — check your API keys in .env and restart the backend."
+              : `I hit a snag: ${err?.message || "connection error"}. Try again in a moment.`;
         setMessages((prev) =>
           prev.map((m) =>
-            m.id === aiId
-              ? { ...m, content: "Something went wrong with the connection. Please try again.", streaming: false }
-              : m
+            m.id === aiId ? { ...m, content: msg, streaming: false } : m
           )
         );
       } finally {
@@ -504,44 +534,25 @@ export default function SmartSpendChatbot({ onNavigate, month, year, dashboardSc
       setFeatureButtons(featureButtonsForScope(scope));
       setIdentityScope(scope || null);
 
-      if (scope === "linked_full") {
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: `ai-doc-${Date.now()}`,
-            role: "assistant",
-            content: `Hey ${firstName}! Here's your ${inst} statement — ${result.transaction_count || 0} transactions parsed. Tap a button below or ask anything.`,
-            streaming: false,
-            timestamp: Date.now(),
-          },
-        ]);
-      } else if (scope === "unlinked_same_bank") {
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: `sys-${Date.now()}`,
-            role: "system",
-            content:
-              result.warning_message ||
-              `Hey ${firstName}, this looks like your ${inst} statement, but it isn't linked to SmartSpend yet. Link it in Settings for full analysis.`,
-            identity_scope: scope,
-            timestamp: Date.now(),
-          },
-        ]);
-      } else if (result.warning_message) {
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: `sys-${Date.now()}`,
-            role: "system",
-            content:
-              result.warning_message ||
-              `Hey ${firstName}, this statement appears to belong to a different person. I can't analyze someone else's financial data.`,
-            identity_scope: scope,
-            timestamp: Date.now(),
-          },
-        ]);
-        setFeatureButtons([]);
+      const txCount = Number(result.transaction_count) || 0;
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `ai-doc-${Date.now()}`,
+          role: "assistant",
+          content: buildUploadAssistantReply({
+            firstName,
+            inst,
+            txCount,
+            scope,
+            warningMessage: result.warning_message,
+          }),
+          streaming: false,
+          timestamp: Date.now(),
+        },
+      ]);
+      if (txCount > 0 && scope !== "unlinked_foreign") {
+        /* feature buttons already set from scope */
       }
     } catch {
       setUploadBanner({ state: "error" });
@@ -666,15 +677,14 @@ export default function SmartSpendChatbot({ onNavigate, month, year, dashboardSc
             return <UserBubble key={msg.id} content={msg.content} timestamp={msg.timestamp ?? Date.now()} />;
           }
           if (msg.role === "system") {
-            const msgScope = msg.identity_scope || identityScope;
-            const isUnlinked = msgScope === "unlinked_foreign" || msgScope === "unlinked_same_bank";
             return (
-              <SystemNoticeBubble
+              <AiBubble
                 key={msg.id}
                 content={msg.content}
+                isStreaming={false}
+                onChipClick={handleChipClick}
+                onNavigateRoute={handleNavigateRoute}
                 timestamp={msg.timestamp ?? Date.now()}
-                showConnectButton={isUnlinked}
-                onConnect={() => onNavigate?.({ tab: "settings", path: "/settings" })}
               />
             );
           }
@@ -695,11 +705,22 @@ export default function SmartSpendChatbot({ onNavigate, month, year, dashboardSc
 
       {/* ── Upload banners ── */}
       {uploadBanner?.state === "done" && (
-        <div className="mx-4 mb-2 shrink-0 flex items-center gap-2 rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-200">
-          <span className="text-emerald-400">✓</span>
+        <div
+          className={`mx-4 mb-2 shrink-0 flex items-center gap-2 rounded-xl border px-3 py-2 text-xs ${
+            (uploadBanner.transaction_count || 0) > 0
+              ? "border-violet-500/30 bg-violet-500/10 text-violet-200"
+              : "border-amber-500/30 bg-amber-500/10 text-amber-200"
+          }`}
+        >
+          <span className={(uploadBanner.transaction_count || 0) > 0 ? "text-violet-400" : "text-amber-400"}>
+            {(uploadBanner.transaction_count || 0) > 0 ? "✓" : "!"}
+          </span>
           <span>
-            <strong>{uploadBanner.institution || "Document"}</strong> parsed —{" "}
-            {uploadBanner.transaction_count} transactions
+            <strong>{uploadBanner.institution || "Document"}</strong>{" "}
+            {(uploadBanner.transaction_count || 0) > 0
+              ? `parsed — ${uploadBanner.transaction_count} transactions`
+              : "uploaded — no transactions detected (try PDF/CSV or clearer screenshot)"}
+            {uploadBanner.text_extraction ? ` · via ${uploadBanner.text_extraction}` : ""}
             {uploadBanner.date_range ? ` · ${uploadBanner.date_range}` : ""}
           </span>
           <button type="button" className="ml-auto text-emerald-400/60 hover:text-emerald-400" onClick={() => setUploadBanner(null)}>×</button>
@@ -755,7 +776,13 @@ export default function SmartSpendChatbot({ onNavigate, month, year, dashboardSc
             <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
           </svg>
         </button>
-        <input ref={fileRef} type="file" accept=".pdf,.csv,.txt" className="hidden" onChange={handleFile} />
+        <input
+          ref={fileRef}
+          type="file"
+          accept=".pdf,.csv,.txt,image/png,image/jpeg,image/jpg,image/webp"
+          className="hidden"
+          onChange={handleFile}
+        />
 
         {/* Text input */}
         <input

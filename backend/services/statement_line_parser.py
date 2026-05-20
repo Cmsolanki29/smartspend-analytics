@@ -10,7 +10,7 @@ import re
 from datetime import date
 from typing import Any
 
-from services.categorizer import resolve_category
+from services.parser_utils import stored_category_for_merchant
 
 _MONTH_ABBR = {
     "jan": 1,
@@ -100,7 +100,7 @@ def parse_axis_style_statement(text: str) -> list[dict[str, Any]]:
             continue
         narr = narration.strip()
         txn_type = _infer_type(narr)
-        category = resolve_category(narr, None)
+        category = stored_category_for_merchant(narr, None)
         out.append(
             {
                 "date": d.isoformat(),
@@ -116,3 +116,197 @@ def parse_axis_style_statement(text: str) -> list[dict[str, Any]]:
     if "date narration" not in text.lower() and len(out) < 8:
         return []
     return out
+
+
+# DD-MM-YYYY / DD/MM/YY rows (HDFC, ICICI, Axis, Kotak, most Indian bank PDFs)
+_NUMERIC_DATE_LINE = re.compile(
+    r"^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})\s+(.+)$",
+)
+_AMOUNT_TAIL = re.compile(r"([\d,]+\.\d{2})\s*$")
+_SKIP_LINE = re.compile(
+    r"^(date|txn\s*date|tran\s*date|narration|particulars|description|withdrawal|deposit|debit|credit|balance|closing|statement|account\s+holder|branch|period|transaction\s+details)",
+    re.I,
+)
+
+
+def _parse_numeric_date(day_s: str, mon_s: str, year_s: str) -> date | None:
+    try:
+        day, month = int(day_s), int(mon_s)
+        year = int(year_s)
+        if year < 100:
+            year += 2000 if year < 70 else 1900
+        return date(year, month, day)
+    except ValueError:
+        return None
+
+
+def parse_indian_tabular_statement(text: str) -> list[dict[str, Any]]:
+    """
+    Parse statement text with numeric dates (``01-02-2026``, ``15/03/24``).
+    Works for PDF text from any bank when table rows survive extraction.
+    """
+    if not text or len(text) < 80:
+        return []
+
+    out: list[dict[str, Any]] = []
+    for raw in text.splitlines():
+        line = raw.strip().replace("|", " ")
+        line = re.sub(r"\s+", " ", line)
+        if not line or len(line) < 12:
+            continue
+        if _SKIP_LINE.match(line):
+            continue
+        m = _NUMERIC_DATE_LINE.match(line)
+        if not m:
+            continue
+        day_s, mon_s, year_s, rest = m.groups()
+        txn_date = _parse_numeric_date(day_s, mon_s, year_s)
+        if not txn_date:
+            continue
+
+        amounts = [float(a.replace(",", "")) for a in _AMOUNT_TAIL.findall(rest)]
+        if not amounts:
+            # narration may end with amount only (no balance column)
+            all_amts = re.findall(r"([\d,]+\.\d{2})", rest)
+            if not all_amts:
+                continue
+            amounts = [float(all_amts[-1].replace(",", ""))]
+
+        narration = rest
+        for a in re.findall(r"[\d,]+\.\d{2}", rest):
+            narration = narration.replace(a, " ")
+        narration = re.sub(r"\s+", " ", narration).strip() or "Transaction"
+
+        if len(amounts) >= 3:
+            withdrawal, deposit, _balance = amounts[0], amounts[1], amounts[2]
+            if withdrawal > 0 and deposit <= 0:
+                amount, txn_type = withdrawal, "debit"
+            elif deposit > 0 and withdrawal <= 0:
+                amount, txn_type = deposit, "credit"
+            elif deposit >= withdrawal:
+                amount, txn_type = deposit, "credit"
+            else:
+                amount, txn_type = withdrawal, "debit"
+        elif len(amounts) == 2:
+            first, second = amounts[0], amounts[1]
+            # Often: txn amount + running balance (larger second value)
+            if second > first * 3 and first > 0:
+                amount = first
+                txn_type = _infer_type(narration)
+            elif first > 0 and second <= 0:
+                amount, txn_type = first, "debit"
+            elif second > 0 and first <= 0:
+                amount, txn_type = second, "credit"
+            else:
+                amount = first
+                txn_type = _infer_type(narration)
+        else:
+            amount = amounts[0]
+            txn_type = _infer_type(narration)
+
+        if amount <= 0:
+            continue
+        out.append(
+            {
+                "date": txn_date.isoformat(),
+                "description": narration[:200],
+                "amount": amount,
+                "type": txn_type,
+                "category": stored_category_for_merchant(narration, None),
+            }
+        )
+
+    if len(out) < 5:
+        return []
+    return out
+
+
+def parse_transactions_from_extraction_tables(tables: list | None) -> list[dict[str, Any]]:
+    """Turn pdfplumber table grids or bank_parser row lists into upload txn dicts."""
+    if not tables:
+        return []
+
+    first = tables[0]
+    if isinstance(first, list) and first and isinstance(first[0], dict):
+        if first[0].get("transaction_date") or first[0].get("amount"):
+            return _bank_parser_rows_to_monster(first)
+
+    try:
+        import pandas as pd
+        from services.bank_parser import BankStatementParser
+
+        parser = BankStatementParser()
+        for table in tables:
+            if not table or not isinstance(table, list):
+                continue
+            if not isinstance(table[0], (list, tuple)):
+                continue
+            rows = [[str(c or "").strip() for c in row] for row in table if row]
+            if len(rows) < 2:
+                continue
+            header = [h.lower() for h in rows[0]]
+            if not any(k in " ".join(header) for k in ("date", "narration", "particular", "debit", "withdrawal")):
+                continue
+            df = pd.DataFrame(rows[1:], columns=rows[0])
+            bank_txns = parser.parse_dataframe(df)
+            if bank_txns:
+                return _bank_parser_rows_to_monster(bank_txns)
+    except Exception as exc:  # noqa: BLE001
+        import logging
+
+        logging.getLogger(__name__).warning("table bank parse skipped: %s", exc)
+    return []
+
+
+def _bank_parser_rows_to_monster(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        d = row.get("transaction_date") or row.get("date")
+        if hasattr(d, "isoformat"):
+            date_str = d.isoformat()
+        else:
+            date_str = str(d)[:10] if d else ""
+        if not date_str:
+            continue
+        try:
+            amount = float(row.get("amount", 0))
+        except (TypeError, ValueError):
+            continue
+        if amount <= 0:
+            continue
+        raw_type = str(row.get("type", "DEBIT")).upper()
+        txn_type = "credit" if raw_type == "CREDIT" else "debit"
+        desc = str(row.get("description") or row.get("merchant") or "Transaction")[:200]
+        out.append(
+            {
+                "date": date_str,
+                "description": desc,
+                "amount": amount,
+                "type": txn_type,
+                "category": row.get("category"),
+            }
+        )
+    return out
+
+
+def best_deterministic_transactions(
+    text: str,
+    tables: list | None = None,
+) -> tuple[list[dict[str, Any]], str]:
+    """Pick the richest non-LLM parse (any bank / credit-card statement text)."""
+    candidates: list[tuple[str, list[dict[str, Any]]]] = []
+    for name, fn in (
+        ("indian_tabular", lambda: parse_indian_tabular_statement(text)),
+        ("axis_line", lambda: parse_axis_style_statement(text)),
+        ("pdf_tables", lambda: parse_transactions_from_extraction_tables(tables)),
+    ):
+        try:
+            rows = fn()
+            if len(rows) >= 5:
+                candidates.append((name, rows))
+        except Exception:  # noqa: BLE001
+            continue
+    if not candidates:
+        return [], "none"
+    best_name, best_rows = max(candidates, key=lambda x: len(x[1]))
+    return best_rows, best_name

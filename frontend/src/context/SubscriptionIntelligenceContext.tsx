@@ -156,7 +156,9 @@ export function SubscriptionIntelligenceProvider({
         try {
           const snap = await getAISummary(userId);
           const tracked = snap?.summary?.subscriptions_tracked ?? 0;
-          if (tracked === 0) {
+          const expected = flow.apps.length;
+          const stale = tracked === 0 || tracked > expected + 1;
+          if (stale) {
             const res = await syncLinkedAppsToBackend(userId);
             if (res?.ok) {
               await Promise.all([

@@ -113,6 +113,8 @@ export function IntroFlow({ onComplete, variant = "signIn" }: IntroFlowProps) {
 
   const [step, setStep] = useState<IntroStep>(() => initialIntroStep(sessionKey, variant));
   const [authMode, setAuthMode] = useState<AuthMode>("signin");
+  /** Bumps when user replays splash from Get Started (forces fresh SplashScreen mount). */
+  const [splashReplayKey, setSplashReplayKey] = useState(0);
 
   const markSeen = useCallback(() => {
     safeWriteFlag();
@@ -171,6 +173,13 @@ export function IntroFlow({ onComplete, variant = "signIn" }: IntroFlowProps) {
     setStep("get-started");
   }, [sessionKey]);
 
+  const fromGetStartedToSplash = useCallback(() => {
+    writeSessionStep(sessionKey, "splash");
+    setSplashReplayKey((k) => k + 1);
+    // Next frame: let Get Started unmount so layoutId does not fight splash replay.
+    requestAnimationFrame(() => setStep("splash"));
+  }, [sessionKey]);
+
   const onAuthenticated = useCallback(() => {
     markSeen();
     onComplete();
@@ -208,9 +217,12 @@ export function IntroFlow({ onComplete, variant = "signIn" }: IntroFlowProps) {
           exit={{ opacity: 0, transition: { duration: 0.4, ease: BRAND_EASE } }}
         >
           <SplashScreen
+            key={`splash-run-${splashReplayKey}`}
             onComplete={fromSplash}
             onSkip={() => skipToAuth("signin")}
-            shieldLayoutId={SHIELD_LAYOUT_ID}
+            shieldLayoutId={
+              splashReplayKey === 0 ? SHIELD_LAYOUT_ID : undefined
+            }
           />
         </motion.div>
       ) : null}
@@ -244,6 +256,7 @@ export function IntroFlow({ onComplete, variant = "signIn" }: IntroFlowProps) {
           <GetStartedScreen
             onCreate={fromGetStartedToCreate}
             onSignIn={fromGetStartedToSignin}
+            onBackToSplash={fromGetStartedToSplash}
             shieldLayoutId={SHIELD_LAYOUT_ID}
           />
         </motion.div>

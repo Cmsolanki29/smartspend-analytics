@@ -565,11 +565,7 @@ def list_alerts(
     ),
     conn=Depends(get_db),
 ):
-    from services.fraud_from_transactions import (
-        merge_alerts,
-        score_scoped_transactions,
-        scoped_db_fraud_alerts,
-    )
+    from services.fraud_from_transactions import get_merged_fraud_alerts
 
     cur = conn.cursor()
     cur.execute("SELECT 1 FROM users WHERE id = %s;", (user_id,))
@@ -580,9 +576,7 @@ def list_alerts(
     valid_severities = {"LOW", "MEDIUM", "HIGH", "CRITICAL"}
     sev_filter = severity.upper() if severity and severity.upper() in valid_severities else None
 
-    db_alerts = scoped_db_fraud_alerts(cur, user_id, scope)
-    txn_alerts = score_scoped_transactions(cur, user_id, scope=scope, min_risk=50)
-    alerts = merge_alerts(db_alerts, txn_alerts)
+    alerts = get_merged_fraud_alerts(cur, user_id, scope, min_risk=50)
     alerts = [a for a in alerts if int(a.get("risk_score") or 0) >= 50]
     if sev_filter:
         alerts = [a for a in alerts if (a.get("severity") or "").upper() == sev_filter]
@@ -812,22 +806,23 @@ def fraud_stats(
     ),
     conn=Depends(get_db),
 ):
-    from services.fraud_from_transactions import (
-        merge_alerts,
-        score_scoped_transactions,
-        scoped_db_fraud_alerts,
-    )
+    from services.fraud_from_transactions import get_merged_fraud_alerts
 
     cur = conn.cursor()
-    cur.execute("SELECT 1 FROM users WHERE id = %s;", (user_id,))
-    if not cur.fetchone():
-        cur.close()
-        raise HTTPException(404, "User not found")
+    try:
+        cur.execute("SELECT 1 FROM users WHERE id = %s;", (user_id,))
+        if not cur.fetchone():
+            raise HTTPException(404, "User not found")
 
-    alerts = merge_alerts(
-        scoped_db_fraud_alerts(cur, user_id, scope),
-        score_scoped_transactions(cur, user_id, scope=scope),
-    )
+        alerts = get_merged_fraud_alerts(cur, user_id, scope, min_risk=50, limit=50)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        cur.close()
+        raise HTTPException(
+            status_code=500,
+            detail="FraudShield stats temporarily unavailable. Please try again.",
+        ) from exc
     attempts = len(alerts)
     threats_blocked = sum(1 for a in alerts if (a.get("user_action") or "").upper() == "BLOCKED")
     money_saved_total = sum(float(a.get("money_saved") or 0) for a in alerts if (a.get("user_action") or "").upper() == "BLOCKED")
@@ -948,13 +943,9 @@ def analyze_fraud(
     )
     total_transactions_analyzed = int(cur.fetchone()[0] or 0)
 
-    from services.fraud_from_transactions import (
-        merge_alerts,
-        score_scoped_transactions,
-        scoped_db_fraud_alerts,
-    )
+    from services.fraud_from_transactions import get_merged_fraud_alerts
 
-    alerts = merge_alerts(scoped_db_fraud_alerts(cur, user_id), score_scoped_transactions(cur, user_id))
+    alerts = get_merged_fraud_alerts(cur, user_id, scope, min_risk=50)
 
     fraud_alerts_found = len(alerts)
     high_risk_count = sum(1 for a in alerts if a["risk_score"] >= 60)
@@ -1192,10 +1183,28 @@ def check_transaction(user_id: int, body: TransactionCheckRequest, conn=Depends(
     )
 
 
+@router.post("/{user_id}/rescore")
+def rescore_user_transactions(
+    user_id: int,
+    conn=Depends(get_db),
+):
+    """Re-run background fraud scoring for this user (all recent debits)."""
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM users WHERE id = %s;", (user_id,))
+    if not cur.fetchone():
+        cur.close()
+        raise HTTPException(404, "User not found")
+    cur.close()
+    from services.fraud_batch_scorer import schedule_fraud_batch_score
+
+    schedule_fraud_batch_score(user_id)
+    return {"success": True, "message": "Fraud scoring queued in background."}
+
+
 @router.get("/{user_id}/live-events")
 def live_fraud_events(user_id: int, limit: int = 20, conn=Depends(get_db)):
-    """Recent in-scope transactions scored for the live feed (no simulated ticker)."""
-    from services.fraud_from_transactions import score_scoped_transactions
+    """Recent scored transactions for the live feed (reads persisted scores)."""
+    from services.fraud_from_transactions import get_live_events_from_db
     from services.dashboard_scope import fetch_dashboard_mode
 
     cur = conn.cursor()
@@ -1204,26 +1213,6 @@ def live_fraud_events(user_id: int, limit: int = 20, conn=Depends(get_db)):
         cur.close()
         raise HTTPException(404, "User not found")
     mode = fetch_dashboard_mode(cur, user_id)
-    scored = score_scoped_transactions(cur, user_id, limit=limit, min_risk=0)
+    events = get_live_events_from_db(cur, user_id, limit=limit)
     cur.close()
-    events = []
-    for a in scored:
-        risk = int(a.get("risk_score") or 0)
-        if risk >= 65:
-            st = "BLOCKED"
-        elif risk >= 35:
-            st = "REVIEW"
-        else:
-            st = "APPROVED"
-        events.append(
-            {
-                "id": a.get("id"),
-                "transaction_id": a.get("transaction_id"),
-                "merchant": a.get("merchant") or a.get("pattern_matched"),
-                "amount": a.get("amount_at_risk"),
-                "status": st,
-                "score": risk,
-                "ts": a.get("created_at"),
-            }
-        )
     return {"events": events, "dashboard_mode": mode, "source": "transactions"}

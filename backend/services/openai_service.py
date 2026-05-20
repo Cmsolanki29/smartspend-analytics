@@ -348,41 +348,37 @@ def _coerce_insight_card(raw: dict[str, Any], user_data: dict[str, Any]) -> dict
         verdict = "AVERAGE"
 
     ki = raw.get("key_insights")
-    ki_list = [clip(x, 95) for x in ki] if isinstance(ki, list) else []
-    ki_list = [x for x in ki_list if x][:3]
-    while len(ki_list) < 3:
-        ki_list.append(f"Health score {user_data.get('health_score', 0)}/100")
+    ki_list = [clip(x, 72) for x in ki] if isinstance(ki, list) else []
+    ki_list = [x for x in ki_list if x][:2]
 
     warn = raw.get("warnings")
-    w_list = [clip(x, 95) for x in warn] if isinstance(warn, list) else []
-    w_list = [x for x in w_list if x][:2]
+    w_list = [clip(x, 72) for x in warn] if isinstance(warn, list) else []
+    w_list = [x for x in w_list if x][:1]
 
     rec = raw.get("recommendations")
-    r_list = [clip(x, 105) for x in rec] if isinstance(rec, list) else []
-    r_list = [x for x in r_list if x][:3]
-    while len(r_list) < 3:
-        r_list.append("Set a monthly budget for your top spending categories.")
+    r_list = [clip(x, 80) for x in rec] if isinstance(rec, list) else []
+    r_list = [x for x in r_list if x][:2]
 
     pos = raw.get("positive_highlights")
-    p_list = [clip(x, 95) for x in pos] if isinstance(pos, list) else []
-    p_list = [x for x in p_list if x][:2]
+    p_list = [clip(x, 72) for x in pos] if isinstance(pos, list) else []
+    p_list = [x for x in p_list if x][:1]
     if not p_list:
-        p_list.append("You are actively tracking spend in SmartSpend.")
+        p_list.append("Tracking live in SmartSpend.")
 
-    summ = clip(raw.get("summary"), 240)
+    summ = clip(raw.get("summary"), 120)
     if not summ:
         summ = clip(
-            f"{user_data.get('name') or 'User'}, you saved ₹{user_data.get('total_saved', 0):,.0f} "
-            f"this month ({user_data.get('savings_rate', 0)}% savings rate).",
-            240,
+            f"Health {user_data.get('health_score', 0)}/100 · "
+            f"{user_data.get('savings_rate', 0):.0f}% saved this month.",
+            120,
         )
 
     return {
         "summary": summ,
-        "key_insights": ki_list[:3],
+        "key_insights": ki_list[:2],
         "warnings": w_list,
-        "recommendations": r_list[:3],
-        "positive_highlights": p_list[:2],
+        "recommendations": r_list[:2],
+        "positive_highlights": p_list[:1],
         "spending_verdict": verdict,
     }
 
@@ -399,14 +395,13 @@ def _verdict_from_health_score(health_score: int) -> str:
 
 def generate_rule_based_insight_card(user_data: dict[str, Any]) -> dict[str, Any]:
     """Deterministic insight card from build_user_data totals — no invented numbers."""
-    nm = user_data.get("name") or "User"
     hs = int(user_data.get("health_score") or 0)
     income = float(user_data.get("total_income") or 0)
-    expense = float(user_data.get("total_expense") or 0)
     saved = float(user_data.get("total_saved") or 0)
     savings_rate = float(user_data.get("savings_rate") or 0)
     anomalies = int(user_data.get("anomaly_count") or 0)
     verdict = _verdict_from_health_score(hs)
+    plan = user_data.get("planning_snapshot") or {}
 
     cats = user_data.get("category_breakdown") or []
     top_cat = ""
@@ -415,37 +410,72 @@ def generate_rule_based_insight_card(user_data: dict[str, Any]) -> dict[str, Any
         if isinstance(top, dict):
             top_cat = str(top.get("category") or top.get("name") or "")
 
+    emi_pct = plan.get("emi_burden_pct")
+    emi_line = (
+        f"EMIs ≈ {emi_pct:.0f}% of income"
+        if emi_pct is not None
+        else (f"{plan.get('emi_count', 0)} active EMI(s)" if plan.get("emi_count") else None)
+    )
+    goals_n = int(plan.get("active_purchase_goals") or 0)
+    fest_n = int(plan.get("active_festivals") or 0)
+    plan_line = None
+    burden_pct = (plan or {}).get("planning_burden_pct")
+    if burden_pct is not None:
+        plan_line = f"Monthly plans + EMIs ≈ {burden_pct:.0f}% of income"
+    elif goals_n or fest_n:
+        plan_line = f"{goals_n} purchase goal(s), {fest_n} festival budget(s) tracked"
+
+    summary = f"Health {hs}/100 · {savings_rate:.0f}% savings"
+    if saved > 0:
+        summary += f" · ₹{saved:,.0f} left"
+    summary = summary[:120]
+
+    key_insights: list[str] = []
+    if top_cat:
+        key_insights.append(f"Top spend: {top_cat}")
+    if emi_line:
+        key_insights.append(emi_line)
+    if plan_line:
+        key_insights.append(plan_line)
+    if anomalies:
+        key_insights.append(f"{anomalies} flagged txn(s) — check FraudShield")
+    if not key_insights:
+        key_insights.append(
+            f"Savings {savings_rate:.0f}% on ₹{income:,.0f} income" if income > 0 else "Add salary credits to refine insights"
+        )
+
+    recs: list[str] = []
+    if emi_pct is not None and emi_pct > 35:
+        recs.append("Lower EMI burden before new loans (EMI Tracker).")
+    if goals_n and int(plan.get("purchase_goals_on_track") or 0) < goals_n:
+        recs.append("Catch up on Purchase Planner monthly targets.")
+    if burden_pct is not None and burden_pct > 40:
+        recs.append("Lower plan + EMI load — remove closed goals or trim festival targets.")
+    elif fest_n and (plan.get("festival_progress_pct") or 0) < 50:
+        recs.append("Boost Festival savings for upcoming events.")
+    if not recs:
+        recs.append("Cap top-2 categories for the rest of this month.")
+    if anomalies:
+        recs.append("Clear FraudShield flags you trust.")
+
     raw = {
-        "summary": (
-            f"{nm}, this month you recorded ₹{income:,.0f} income and ₹{expense:,.0f} spend "
-            f"({savings_rate:.1f}% savings rate). Health score is {hs}/100."
-        )[:240],
-        "key_insights": [
-            f"Health score {hs}/100",
-            f"Savings rate {savings_rate:.1f}% on ₹{income:,.0f} income" if income > 0 else "No salary credits detected this month",
-            f"{anomalies} flagged transaction(s) this month" if anomalies else "No anomaly flags this month",
-        ],
+        "summary": summary,
+        "key_insights": key_insights[:2],
         "warnings": (
-            [f"{anomalies} transactions flagged — review in FraudShield."]
+            [f"{anomalies} flagged — open FraudShield."]
             if anomalies > 0
             else []
         ),
-        "recommendations": [
-            "Set weekly caps on your top 2 spending categories",
-            "Reconcile EMIs and subscriptions against income",
-            "Enable bank UPI alerts for the next 7 days",
-        ],
+        "recommendations": recs[:2],
         "positive_highlights": (
-            [f"You saved ₹{saved:,.0f} this month."]
+            [f"₹{saved:,.0f} saved this month."]
             if saved > 0
-            else ["Your transactions are being tracked in SmartSpend."]
+            else ["Spend data is synced."]
         ),
         "spending_verdict": verdict,
         "health_score": hs,
         "generated_by": "fallback",
     }
-    if top_cat:
-        raw["key_insights"].append(f"Largest spend category: {top_cat}")
     card = _coerce_insight_card(raw, user_data)
     card["generated_by"] = "fallback"
     card["health_score"] = hs

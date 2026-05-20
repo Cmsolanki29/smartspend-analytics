@@ -5,16 +5,19 @@ Stages: extract_with_retry → classify_and_extract_monster → validate → ded
 """
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import logging
+import os
 import re
 from datetime import datetime
 from typing import Any
 
+from services.ai_llm_provider import preferred_provider
 from services.document_parser_service import classify_and_extract_monster
 from services.transaction_upsert import enrich_transaction_row
 from services.monster_extraction import extract_with_retry, update_extraction_llm_result
-from services.statement_line_parser import parse_axis_style_statement
+from services.statement_line_parser import best_deterministic_transactions
 from services.transaction_enrichment import heuristic_anomaly
 
 logger = logging.getLogger(__name__)
@@ -70,6 +73,41 @@ def _is_internal_transfer(merchant: str, description: str) -> bool:
     return any(k in combined for k in _TRANSFER_KEYWORDS)
 
 
+def _agentic_first_enabled() -> bool:
+    return os.getenv("SMARTSPEND_AGENTIC_FIRST", "1").lower() in ("1", "true", "yes")
+
+
+def _try_agentic_extract(
+    text: str,
+    filename: str,
+    tables: list | None,
+) -> dict[str, Any]:
+    """Run Groq/Gemini agentic router with a hard timeout, then caller may fallback."""
+    timeout_s = float(os.getenv("SMARTSPEND_AGENTIC_TIMEOUT_SEC", "45") or "45")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        fut = pool.submit(
+            classify_and_extract_monster,
+            text,
+            filename,
+            tables,
+            agentic_first=True,
+        )
+        try:
+            return fut.result(timeout=max(5.0, timeout_s))
+        except concurrent.futures.TimeoutError:
+            logger.warning("Agentic LLM extract timed out after %ss", timeout_s)
+            return {
+                "institution": "",
+                "document_type": "bank_statement",
+                "date_range": None,
+                "transactions": [],
+                "total_extracted": 0,
+                "method": "agentic_timeout",
+                "llm_model": None,
+                "validation_issues": [f"Agentic extract timed out after {timeout_s}s"],
+            }
+
+
 class PDFParserAgent:
     """Extract, validate, deduplicate and insert transactions from uploaded files."""
 
@@ -81,6 +119,8 @@ class PDFParserAgent:
         document_id: int,
         connected_source_id: int | None,
         conn,
+        *,
+        skip_duplicate_check: bool | None = None,
     ) -> dict[str, Any]:
         self._set_status(conn, document_id, "processing")
         conn.commit()
@@ -121,34 +161,66 @@ class PDFParserAgent:
             conn.commit()
             return {"success": False, "error": text, "quality_score": quality_score}
 
-        deterministic = parse_axis_style_statement(text)
-        if len(deterministic) >= 10:
+        deterministic, det_method = best_deterministic_transactions(
+            text, extraction.get("tables")
+        )
+        min_det = 8
+        tables = extraction.get("tables")
+        use_agentic = _agentic_first_enabled() and preferred_provider() != "none"
+
+        if use_agentic:
+            logger.info("Upload: trying agentic LLM first (provider=%s)", preferred_provider())
+            parsed = _try_agentic_extract(text, filename, tables)
+            transactions = list(parsed.get("transactions") or [])
+            if len(transactions) < min_det and len(deterministic) >= min_det:
+                logger.info(
+                    "Agentic returned %s rows; monster fallback %s (%s rows)",
+                    len(transactions),
+                    det_method,
+                    len(deterministic),
+                )
+                transactions = deterministic
+                parsed = {
+                    "transactions": transactions,
+                    "method": f"chunked_llm→{det_method}",
+                    "institution": parsed.get("institution") or "",
+                    "document_type": parsed.get("document_type") or "bank_statement",
+                    "date_range": parsed.get("date_range"),
+                    "validation_issues": list(parsed.get("validation_issues") or []),
+                }
+            elif deterministic and len(deterministic) > len(transactions):
+                seen = {
+                    f"{t.get('date','')}|{float(t.get('amount',0)):.2f}|{str(t.get('description',''))[:24].lower()}"
+                    for t in transactions
+                }
+                for t in deterministic:
+                    key = f"{t.get('date','')}|{float(t.get('amount',0)):.2f}|{str(t.get('description',''))[:24].lower()}"
+                    if key not in seen:
+                        transactions.append(t)
+                        seen.add(key)
+                parsed["transactions"] = transactions
+                parsed["method"] = (parsed.get("method") or "chunked_llm") + f"+{det_method}"
+        elif len(deterministic) >= min_det:
             transactions = deterministic
             parsed = {
                 "transactions": transactions,
-                "method": "axis_line_parser",
-                "institution": "AXIS BANK",
+                "method": det_method,
+                "institution": "",
                 "document_type": "bank_statement",
                 "date_range": None,
                 "validation_issues": [],
             }
-            period = re.search(
-                r"(\d{1,2}\s+[A-Za-z]+\s+\d{4})\s*-\s*(\d{1,2}\s+[A-Za-z]+\s+\d{4})",
-                text,
-                re.I,
-            )
-            if period:
-                parsed["date_range"] = f"{period.group(1)} - {period.group(2)}"
         else:
             parsed = classify_and_extract_monster(
                 text=text,
                 filename=filename,
-                tables=extraction.get("tables"),
+                tables=tables,
+                agentic_first=False,
             )
             transactions = parsed.get("transactions", [])
             if len(deterministic) >= len(transactions):
                 transactions = deterministic
-                parsed["method"] = "axis_line_parser"
+                parsed["method"] = det_method
             elif deterministic:
                 seen = {
                     f"{t.get('date','')}|{float(t.get('amount',0)):.2f}|{str(t.get('description',''))[:24].lower()}"
@@ -159,25 +231,51 @@ class PDFParserAgent:
                     if key not in seen:
                         transactions.append(t)
                         seen.add(key)
-                parsed["method"] = (parsed.get("method") or "") + "+axis_merge"
+                parsed["method"] = (parsed.get("method") or "chunked_llm") + f"+{det_method}"
+
+        period = re.search(
+            r"(\d{1,2}\s+[A-Za-z]+\s+\d{4})\s*-\s*(\d{1,2}\s+[A-Za-z]+\s+\d{4})",
+            text,
+            re.I,
+        )
+        if period and parsed.get("date_range") is None:
+            parsed["date_range"] = f"{period.group(1)} - {period.group(2)}"
+        period2 = re.search(
+            r"(\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4})\s*to\s*(\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4})",
+            text,
+            re.I,
+        )
+        if period2 and parsed.get("date_range") is None:
+            parsed["date_range"] = f"{period2.group(1)} - {period2.group(2)}"
         validation_issues: list[str] = list(extraction.get("quality_issues") or [])
         if parsed.get("validation_issues"):
             validation_issues.extend(parsed["validation_issues"])
 
         imported = duplicates = invalid = internal = 0
+        if skip_duplicate_check is None:
+            skip_duplicate_check = os.getenv("SMARTSPEND_SKIP_UPLOAD_DEDUP", "1").lower() in (
+                "1",
+                "true",
+                "yes",
+            )
 
         for txn in transactions:
             if not self._is_valid(txn):
                 invalid += 1
                 continue
 
-            row = enrich_transaction_row(
-                {
-                    "merchant": (txn.get("description") or "").strip()[:100] or "Unknown",
-                    "category": txn.get("category"),
-                    "description": (txn.get("description") or "")[:200],
-                }
-            )
+            try:
+                row = enrich_transaction_row(
+                    {
+                        "merchant": (txn.get("description") or "").strip()[:100] or "Unknown",
+                        "category": txn.get("category"),
+                        "description": (txn.get("description") or "")[:200],
+                    }
+                )
+            except Exception as enrich_exc:  # noqa: BLE001
+                logger.warning("Row enrich skipped: %s", enrich_exc)
+                invalid += 1
+                continue
             merchant = row["merchant"]
             desc = (row.get("description") or "")[:200]
             try:
@@ -199,7 +297,9 @@ class PDFParserAgent:
                 internal += 1
                 continue
 
-            if self._is_duplicate(conn, user_id, txn_date, merchant, amount, connected_source_id):
+            if not skip_duplicate_check and self._is_duplicate(
+                conn, user_id, txn_date, merchant, amount, connected_source_id
+            ):
                 duplicates += 1
                 continue
 
@@ -241,6 +341,15 @@ class PDFParserAgent:
 
         self._mark_completed(conn, document_id, len(transactions), imported, duplicates)
         conn.commit()
+
+        if imported > 0:
+            try:
+                from services.transaction_enrichment import sync_all_monthly_summaries_for_user
+
+                sync_all_monthly_summaries_for_user(conn, user_id)
+                conn.commit()
+            except Exception:  # noqa: BLE001
+                logger.warning("monthly summary sync after import failed", exc_info=True)
 
         llm_raw = json.dumps({
             "institution": parsed.get("institution"),

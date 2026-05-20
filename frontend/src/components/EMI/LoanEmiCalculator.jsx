@@ -6,15 +6,7 @@ import { inr } from "../../lib/format";
 import { GlassCard } from "../intro/GlassCard";
 import { SectionTitle } from "../Dashboard/shared/SectionTitle";
 import { useToast } from "../common/Toast";
-
-function dispatchPurchaseGoalsChanged(userId) {
-  try {
-    window.dispatchEvent(new CustomEvent("smartspend:purchase-goals-changed", { detail: { userId } }));
-    window.dispatchEvent(new CustomEvent("smartspend-financial-sync", { detail: { userId } }));
-  } catch {
-    /* ignore */
-  }
-}
+import { syncHealthScoreAfterMutation } from "../../utils/financialSync";
 
 function defaultTargetDate(monthsFromNow = 12) {
   const d = new Date();
@@ -78,7 +70,7 @@ export default function LoanEmiCalculator({ userId, onAdded }) {
         annual_interest_rate_pct: Number(rate) || 12,
         emi_tenure_months: months,
       });
-      dispatchPurchaseGoalsChanged(userId);
+      await syncHealthScoreAfterMutation(userId);
       showToast("Added to Purchase Planner with EMI details", "success");
       onAdded?.();
     } catch (e) {

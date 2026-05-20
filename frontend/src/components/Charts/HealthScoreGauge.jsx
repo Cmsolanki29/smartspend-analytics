@@ -13,11 +13,13 @@ const WEAKEST_DOT_COLOR = "#A78BFA";
 function weakestDotColor(components) {
   const comp = components || {};
   const items = [
-    { points: Number(comp.savings_points ?? 0), max: 30, color: "#22c55e" },
-    { points: Number(comp.anomaly_points ?? 0), max: 20, color: "#ef4444" },
-    { points: Number(comp.expense_points ?? 0), max: 25, color: "#f59e0b" },
-    { points: Number(comp.consistency_points ?? 0), max: 15, color: "#3b82f6" },
-    { points: Number(comp.diversity_points ?? 0), max: 10, color: "#a855f7" },
+    { points: Number(comp.savings_points ?? 0), max: 22, color: "#22c55e" },
+    { points: Number(comp.anomaly_points ?? 0), max: 13, color: "#ef4444" },
+    { points: Number(comp.expense_points ?? 0), max: 18, color: "#f59e0b" },
+    { points: Number(comp.consistency_points ?? 0), max: 10, color: "#3b82f6" },
+    { points: Number(comp.diversity_points ?? 0), max: 5, color: "#a855f7" },
+    { points: Number(comp.emi_points ?? 0), max: 17, color: "#06b6d4" },
+    { points: Number(comp.planning_points ?? 0), max: 15, color: "#ec4899" },
   ];
   const weakest = items.reduce((min, x) => {
     const ratio = x.points / Math.max(x.max, 1);
@@ -108,7 +110,27 @@ const gradeColor = {
 const ARC_PATH = "M 20 105 A 80 80 0 0 1 180 105";
 const ARC_LENGTH = 251.3; // π × 80
 
-// ── Trend badge ────────────────────────────────────────────────────────────
+// ── Overall health band (score level) ───────────────────────────────────────
+const BAND_STYLES = {
+  STABLE: "border-emerald-500/35 bg-emerald-500/10 text-emerald-300",
+  MODERATE: "border-amber-500/35 bg-amber-500/10 text-amber-200",
+  AT_RISK: "border-orange-500/40 bg-orange-500/10 text-orange-200",
+  CRITICAL: "border-rose-500/40 bg-rose-500/10 text-rose-200",
+  UNKNOWN: "border-white/10 bg-white/[0.06] text-white/60",
+};
+
+function HealthBandBadge({ band, label }) {
+  const id = String(band || "UNKNOWN").toUpperCase();
+  const text = label || id.replace(/_/g, " ");
+  const cls = BAND_STYLES[id] || BAND_STYLES.UNKNOWN;
+  return (
+    <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide ${cls}`}>
+      {text}
+    </span>
+  );
+}
+
+// ── Month-over-month trend (separate from health band) ─────────────────────
 function TrendBadge({ trend }) {
   const up = trend === "IMPROVING";
   const down = trend === "DECLINING";
@@ -117,17 +139,21 @@ function TrendBadge({ trend }) {
     ? "border-emerald-500/35 bg-emerald-500/10 text-emerald-300"
     : down
     ? "border-rose-500/35 bg-rose-500/10 text-rose-300"
-    : "border-white/10 bg-white/[0.06] text-white/60";
+    : "border-white/10 bg-white/[0.06] text-white/50";
+  const label = up ? "Improving" : down ? "Declining" : "Flat vs last month";
   return (
-    <span className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-[11px] font-semibold ${cls}`}>
-      <Icon className="h-3.5 w-3.5" aria-hidden />
-      {trend || "STABLE"}
+    <span
+      className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium ${cls}`}
+      title="Change vs previous month score"
+    >
+      <Icon className="h-3 w-3" aria-hidden />
+      {label}
     </span>
   );
 }
 
 // ── Sub-score bar ──────────────────────────────────────────────────────────
-function Breakdown({ label, value, max, delayMs }) {
+function Breakdown({ label, value, max, delayMs, hint }) {
   const v =
     value === null || value === undefined || Number.isNaN(Number(value))
       ? null
@@ -141,6 +167,7 @@ function Breakdown({ label, value, max, delayMs }) {
         <span className="text-white/60">{label}</span>
         <span className="tabular-nums font-semibold text-white/85">{labelRight}</span>
       </div>
+      {hint ? <p className="text-[10px] leading-snug text-white/40">{hint}</p> : null}
       <div className="h-1.5 overflow-hidden rounded-full bg-white/[0.06]">
         <motion.div
           className="h-full rounded-full"
@@ -311,6 +338,19 @@ const HealthScoreGauge = ({
   const grade = healthData.grade || "F";
   const comp = healthData.components || {};
   const trend = healthData.trend || "STABLE";
+  const healthBand = healthData.health_band || null;
+  const healthLabel = healthData.health_label || null;
+  const bandFromScore = (s) => {
+    const n = Number(s);
+    if (Number.isNaN(n)) return { band: "UNKNOWN", label: "—" };
+    if (n >= 70) return { band: "STABLE", label: "Stable" };
+    if (n >= 60) return { band: "MODERATE", label: "Moderate" };
+    if (n >= 50) return { band: "AT_RISK", label: "Needs attention" };
+    return { band: "CRITICAL", label: "Critical" };
+  };
+  const fallbackBand = bandFromScore(rawScore);
+  const displayBand = healthBand || fallbackBand.band;
+  const displayBandLabel = healthLabel || fallbackBand.label;
   const recommendations = Array.isArray(healthData.recommendations) ? healthData.recommendations : [];
   const recDotColor = useMemo(() => weakestDotColor(comp), [comp]);
 
@@ -406,12 +446,26 @@ const HealthScoreGauge = ({
   }, [targetScore, loading, loadError, reduce]);
 
   // ── Sub-scores ─────────────────────────────────────────────────────────
+  const goalsHint = (() => {
+    const goals = Number(comp.active_purchase_goals ?? 0);
+    const fests = Number(comp.active_festivals ?? 0);
+    const burden = comp.planning_burden_pct;
+    if (!goals && !fests && burden == null) return null;
+    const parts = [];
+    if (goals) parts.push(`${goals} purchase goal${goals > 1 ? "s" : ""}`);
+    if (fests) parts.push(`${fests} festival${fests > 1 ? "s" : ""}`);
+    if (burden != null) parts.push(`${Number(burden)}% of income committed`);
+    return parts.join(" · ");
+  })();
+
   const breakdowns = [
-    { label: "Savings Rate", value: comp.savings_points, max: 30, delay: 0 },
-    { label: "Security", value: comp.anomaly_points, max: 20, delay: 200 },
-    { label: "Expense Ratio", value: comp.expense_points, max: 25, delay: 400 },
-    { label: "Consistency", value: comp.consistency_points, max: 15, delay: 600 },
-    { label: "Diversity", value: comp.diversity_points, max: 10, delay: 800 },
+    { label: "Savings Rate", value: comp.savings_points, max: 22, delay: 0 },
+    { label: "Security", value: comp.anomaly_points, max: 13, delay: 150 },
+    { label: "Expense Ratio", value: comp.expense_points, max: 18, delay: 300 },
+    { label: "Consistency", value: comp.consistency_points, max: 10, delay: 450 },
+    { label: "Diversity", value: comp.diversity_points, max: 5, delay: 600 },
+    { label: "EMI Burden", value: comp.emi_points, max: 17, delay: 750 },
+    { label: "Goals & Events", value: comp.planning_points, max: 15, delay: 900, hint: goalsHint },
   ];
 
   // ── Error state ─────────────────────────────────────────────────────────
@@ -489,9 +543,12 @@ const HealthScoreGauge = ({
   if (variant === "hero") {
     return (
       <PremiumCard variant="purple" topAccent interactive={false}>
-        <div className="mb-2 flex items-center justify-between gap-2">
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
           <h3 className="font-heading text-sm font-semibold text-white sm:text-base">Financial health</h3>
-          <TrendBadge trend={trend} />
+          <div className="flex flex-wrap items-center gap-1.5">
+            <HealthBandBadge band={displayBand} label={displayBandLabel} />
+            <TrendBadge trend={trend} />
+          </div>
         </div>
         <SvgGauge displayScore={displayScore} score={targetScore} grade={grade} reduce={reduce} />
         {(narration || (showNarrative && narrativeLine)) && (
@@ -512,8 +569,10 @@ const HealthScoreGauge = ({
           <p className="text-[11px] font-bold uppercase tracking-[0.15em] text-gray-500">Financial Health</p>
           <h3 className="font-heading text-base font-semibold text-white">Health Score</h3>
         </div>
-        {/* STABLE / IMPROVING / DECLINING badge */}
-        <TrendBadge trend={trend} />
+        <div className="flex flex-col items-end gap-1">
+          <HealthBandBadge band={displayBand} label={displayBandLabel} />
+          <TrendBadge trend={trend} />
+        </div>
       </div>
 
       {/* SVG Gauge */}
@@ -521,11 +580,24 @@ const HealthScoreGauge = ({
 
       {/* Sub-score bars */}
       <div className="mt-5 space-y-3 border-t border-white/[0.06] pt-4">
-        {breakdowns.map(({ label, value, max, delay }) => (
-          <Breakdown key={label} label={label} value={value} max={max} delayMs={delay} />
+        {breakdowns.map(({ label, value, max, delay, hint }) => (
+          <Breakdown key={label} label={label} value={value} max={max} delayMs={delay} hint={hint} />
         ))}
       </div>
 
+      {comp.month_net_inr != null || comp.ytd_saved_inr != null ? (
+        <p className="mt-3 text-[11px] leading-relaxed text-white/45">
+          {comp.month_net_inr != null ? (
+            <span>Month net (ledger): ₹{Number(comp.month_net_inr).toLocaleString("en-IN")}</span>
+          ) : null}
+          {comp.ytd_saved_inr != null ? (
+            <span>
+              {comp.month_net_inr != null ? " · " : ""}
+              YTD saved: ₹{Number(comp.ytd_saved_inr).toLocaleString("en-IN")}
+            </span>
+          ) : null}
+        </p>
+      ) : null}
       {showNarrative && narrativeLine ? (
         <p className="mt-3 text-[13px] leading-relaxed text-white/45">{narrativeLine}</p>
       ) : null}

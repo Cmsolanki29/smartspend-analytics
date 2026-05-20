@@ -13,11 +13,15 @@ if str(_backend_dir) not in sys.path:
 
 from psycopg2.extensions import connection as PgConnection
 
+from services.subscription_intelligence.linked_apps import fetch_linked_packages
 from services.subscription_intelligence.verdict_engine import compute_pkg_growth
 
 
 def detect_substitutions(conn: PgConnection, user_id: int) -> list[dict[str, Any]]:
     cur = conn.cursor()
+    pkgs = fetch_linked_packages(conn, user_id)
+    if not pkgs:
+        return []
     try:
         today = date.today()
         last30_start = today - timedelta(days=30)
@@ -28,10 +32,10 @@ def detect_substitutions(conn: PgConnection, user_id: int) -> list[dict[str, Any
             """
             SELECT id, merchant, monthly_cost, intelligence_category, linked_app_package, current_verdict
             FROM subscriptions
-            WHERE user_id = %s AND linked_app_package IS NOT NULL
+            WHERE user_id = %s AND linked_app_package = ANY(%s::varchar[])
               AND current_verdict IN ('declining', 'dormant', 'dead');
             """,
-            (user_id,),
+            (user_id, pkgs),
         )
         subs = cur.fetchall()
         out: list[dict[str, Any]] = []
@@ -115,6 +119,9 @@ def detect_category_migrations(conn: PgConnection, user_id: int) -> list[dict[st
     (usage migration signal). Complements graph-based detect_substitutions().
     """
     cur = conn.cursor()
+    pkgs = fetch_linked_packages(conn, user_id)
+    if not pkgs:
+        return []
     insights: list[dict[str, Any]] = []
     try:
         cur.execute(
@@ -130,13 +137,12 @@ def detect_category_migrations(conn: PgConnection, user_id: int) -> list[dict[st
             FROM subscriptions s
             CROSS JOIN LATERAL calculate_usage_change(s.user_id, s.id, 30, 30) AS calc
             WHERE s.user_id = %s
-              AND s.linked_app_package IS NOT NULL
-              AND length(trim(s.linked_app_package)) > 0
+              AND s.linked_app_package = ANY(%s::varchar[])
               AND s.intelligence_category IS NOT NULL
               AND length(trim(s.intelligence_category)) > 0
               AND COALESCE(calc.change_percentage, 0) < -50;
             """,
-            (user_id,),
+            (user_id, pkgs),
         )
         declining = cur.fetchall()
         for dec_id, dec_name, dec_cost, category, _dc, _dp, _dchg in declining:
@@ -153,11 +159,11 @@ def detect_category_migrations(conn: PgConnection, user_id: int) -> list[dict[st
                 WHERE s.user_id = %s
                   AND s.id <> %s
                   AND s.intelligence_category IS NOT DISTINCT FROM %s
-                  AND s.linked_app_package IS NOT NULL
+                  AND s.linked_app_package = ANY(%s::varchar[])
                   AND COALESCE(calc.current_usage_hours, 0) > 10
                   AND COALESCE(calc.change_percentage, 0) > 0;
                 """,
-                (user_id, int(dec_id), category),
+                (user_id, int(dec_id), category, pkgs),
             )
             for thr_id, thr_name, thr_cost, thr_cur, thr_chg in cur.fetchall():
                 dec_cost_f = float(dec_cost or 0)

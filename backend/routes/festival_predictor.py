@@ -7,7 +7,7 @@ import re
 from datetime import date, datetime
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from db import get_db
@@ -273,6 +273,40 @@ def upsert_festival_budget_row(
     cur.close()
 
 
+def _ensure_festival_dismissals_table(cur) -> None:
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS festival_dismissals (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            festival_name VARCHAR(120) NOT NULL,
+            festival_date DATE NOT NULL,
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            UNIQUE (user_id, festival_name, festival_date)
+        );
+        """
+    )
+
+
+def _load_dismissed_festival_keys(cur, user_id: int) -> set[tuple[str, str]]:
+    keys: set[tuple[str, str]] = set()
+    try:
+        _ensure_festival_dismissals_table(cur)
+        cur.execute(
+            """
+            SELECT festival_name, festival_date::date
+            FROM festival_dismissals WHERE user_id = %s;
+            """,
+            (user_id,),
+        )
+        for name, fd in cur.fetchall():
+            d = fd if isinstance(fd, date) else datetime.strptime(str(fd)[:10], "%Y-%m-%d").date()
+            keys.add((_norm_name(str(name)), d.isoformat()))
+    except Exception:
+        pass
+    return keys
+
+
 def _iter_upcoming_festival_slots(
     conn,
     user_id: int,
@@ -282,6 +316,7 @@ def _iter_upcoming_festival_slots(
     """Return (name, date, is_custom) sorted by date — DB rows plus calendar defaults."""
     custom_horizon = _horizon_end(today, CUSTOM_EVENT_MAX_DAYS)
     cur = conn.cursor()
+    dismissed = _load_dismissed_festival_keys(cur, user_id)
     cur.execute(
         """
         SELECT festival_name, festival_date
@@ -302,6 +337,8 @@ def _iter_upcoming_festival_slots(
         d = fd if isinstance(fd, date) else datetime.strptime(str(fd)[:10], "%Y-%m-%d").date()
         name = str(fnm)
         key = (_norm_name(name), d.isoformat())
+        if key in dismissed:
+            continue
         covered.add(key)
         names_from_db.add(_norm_name(name))
         cal_d = _calendar_date_for_name(name)
@@ -315,7 +352,7 @@ def _iter_upcoming_festival_slots(
         if _norm_name(fest["name"]) in names_from_db:
             continue
         key = (_norm_name(fest["name"]), d.isoformat())
-        if key in covered:
+        if key in covered or key in dismissed:
             continue
         out.append((fest["name"], d, False))
 
@@ -376,7 +413,6 @@ def _build_festival_payload(
 
     urgency = _urgency(days_rem)
     progress_pct = round(100.0 * saved / recommended, 1) if recommended > 0 else 0.0
-    linked_goals = _linked_purchase_goals(conn, user_id, fest_name, fest_date)
     return {
         "festival_name": fest_name,
         "festival_date": fest_date.isoformat(),
@@ -391,7 +427,7 @@ def _build_festival_payload(
         "daily_saving_needed": round(daily_need, 2),
         "urgency": urgency,
         "category_breakdown": cat,
-        "linked_goals": linked_goals,
+        "linked_goals": [],
         "ai_advice": ai_advice,
         "saving_tip": saving_tip,
         "if_no_saving_warning": if_no,
@@ -465,6 +501,49 @@ def generate_festival_ai_blocks(
             f"If you do not start saving for {festival} now, you may lean on cards or EMI later and pay extra interest."
         )
     return a, t, w
+
+
+@router.delete("/{user_id}/plan")
+def delete_festival_plan(
+    user_id: int,
+    festival_name: str = Query(..., min_length=1),
+    festival_date: date = Query(...),
+    conn=Depends(get_db),
+):
+    """Remove a festival/event plan from the planner for this user."""
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT 1 FROM users WHERE id = %s;", (user_id,))
+        if not cur.fetchone():
+            raise HTTPException(404, "User not found")
+        _ensure_festival_dismissals_table(cur)
+        cur.execute(
+            """
+            INSERT INTO festival_dismissals (user_id, festival_name, festival_date)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (user_id, festival_name, festival_date) DO NOTHING;
+            """,
+            (user_id, festival_name.strip(), festival_date),
+        )
+        row = _fetch_budget_row(conn, user_id, festival_name, festival_date)
+        if row:
+            cur.execute("DELETE FROM festival_budgets WHERE id = %s AND user_id = %s;", (row[0], user_id))
+        conn.commit()
+    finally:
+        cur.close()
+    try:
+        from services.financial_engine import recalculate_financial_state as _rfs
+
+        _rfs(conn, user_id, "festival_removed", None, f"Removed plan: {festival_name}")
+    except Exception:
+        pass
+    try:
+        from services.scorer import refresh_user_health_score
+
+        refresh_user_health_score(conn, user_id, invalidate_insights=True)
+    except Exception:
+        pass
+    return {"success": True, "festival_name": festival_name, "festival_date": festival_date.isoformat()}
 
 
 @router.get("/{user_id}/history")
@@ -606,6 +685,13 @@ def set_festival_budget(user_id: int, body: SetBudgetBody, conn=Depends(get_db))
             f"with active EMIs ₹{cash['active_emi_monthly']:,.0f}/mo."
         )
 
+    try:
+        from services.scorer import refresh_user_health_score
+
+        refresh_user_health_score(conn, user_id, invalidate_insights=True)
+    except Exception:
+        pass
+
     return {
         "success": True,
         "festival_name": body.festival_name,
@@ -668,10 +754,6 @@ def _linked_purchase_goals(conn, user_id: int, fest_name: str, fest_date: date) 
         if fk and fest_prefix in _norm_name(fk).replace(" ", "_"):
             linked = True
         if dl and _match_db_name(fest_name, dl):
-            linked = True
-        if _match_db_name(fest_name, name):
-            linked = True
-        if abs((td_d - fest_date).days) <= 21:
             linked = True
         if linked:
             out.append(
@@ -741,6 +823,12 @@ def update_festival_savings(user_id: int, body: FestivalUpdateSavingsBody, conn=
         pass
 
     progress_pct = round(100.0 * new_saved / recommended, 1) if recommended > 0 else 0.0
+    try:
+        from services.scorer import refresh_user_health_score
+
+        refresh_user_health_score(conn, user_id, invalidate_insights=True)
+    except Exception:
+        pass
     return {
         "success": True,
         "festival_name": body.festival_name,

@@ -31,6 +31,7 @@ import {
   getSubscriptions,
 } from "../../services/api";
 import { getAISummary } from "../../services/subscriptionIntelligence";
+import { hasVisitedSubscriptionsTab } from "../../utils/subscriptionFlowStorage";
 import HealthScoreGauge from "../Charts/HealthScoreGauge";
 import MonthlyTrendChart from "../Charts/MonthlyTrendChart";
 import SpendingPieChart from "../Charts/SpendingPieChart";
@@ -325,6 +326,16 @@ export default function Dashboard({
     };
   }, [canLiveIntel, authUser?.id]);
 
+  const [subsTabVisited, setSubsTabVisited] = useState(() =>
+    hasVisitedSubscriptionsTab(userId)
+  );
+
+  useEffect(() => {
+    const sync = () => setSubsTabVisited(hasVisitedSubscriptionsTab(userId));
+    sync();
+    window.addEventListener("smartspend:subs-tab-visited", sync);
+    return () => window.removeEventListener("smartspend:subs-tab-visited", sync);
+  }, [userId]);
 
   const trendRow = useMemo(() => {
     const key = monthKey(year, month);
@@ -395,11 +406,16 @@ export default function Dashboard({
   const commandCards = useMemo((): CommandCard[] => {
     const goSubs = () => setActiveTab?.("subscriptions");
     const goFraud = () => setActiveTab?.("fraud");
-    const goInsights = () => setActiveTab?.("insights");
     const out: CommandCard[] = [];
 
-    if (canLiveIntel && aiIntel.summary?.success) {
-      const sum = aiIntel.summary;
+    const sum = aiIntel.summary;
+    const showSubProSignals =
+      subsTabVisited &&
+      canLiveIntel &&
+      Boolean(sum?.success) &&
+      Number(sum?.summary?.subscriptions_tracked || 0) > 0;
+
+    if (showSubProSignals && sum) {
       const s = sum.summary;
       const v = sum.verdicts || {};
       const declining = (v.declining || []) as Array<Record<string, unknown>>;
@@ -475,7 +491,7 @@ export default function Dashboard({
       return out.slice(0, 3);
     }
 
-    if (intel.monthlyWaste > 0.01) {
+    if (subsTabVisited && intel.monthlyWaste > 0.01) {
       out.push({
         id: "waste-fallback",
         urgency: "warning",
@@ -501,33 +517,28 @@ export default function Dashboard({
         onCta: goFraud,
       });
     }
-    out.push({
-      id: "intel-tip",
-      urgency: "info",
-      badge: "Info",
-      title: canLiveIntel ? "Signals warming up" : "Live subscription AI",
-      body: canLiveIntel
-        ? "We will populate this rail as new verdicts and migrations arrive."
-        : "Switch the workspace selector to your signed-in user to stream subscription intelligence here.",
-      ctaLabel: canLiveIntel ? "Insights" : "Transactions",
-      onCta: canLiveIntel ? goInsights : () => setActiveTab?.("transactions"),
-    });
     return out.slice(0, 3);
-  }, [canLiveIntel, aiIntel.summary, intel.monthlyWaste, intel.fraudPending, setActiveTab]);
+  }, [
+    subsTabVisited,
+    canLiveIntel,
+    aiIntel.summary,
+    intel.monthlyWaste,
+    intel.fraudPending,
+    setActiveTab,
+  ]);
 
   const aiSignalCount = useMemo(() => {
-    let n = 0;
+    if (commandCards.length > 0) return commandCards.length;
     if (canLiveIntel && aiIntel.summary?.success) {
       const s = aiIntel.summary.summary;
-      n += Number(s?.at_risk_count || 0) > 0 ? 1 : 0;
-      n += Number(s?.migrations_detected || 0) > 0 ? 1 : 0;
-      n += Number(s?.upgrade_recommended_count || 0) > 0 ? 1 : 0;
-      n += 4;
-    } else {
-      n = 3 + (intel.fraudPending > 0 ? 2 : 0) + (intel.monthlyWaste > 0 ? 1 : 0);
+      let n = 0;
+      if (Number(s?.at_risk_count || 0) > 0) n += 1;
+      if (Number(s?.migrations_detected || 0) > 0) n += 1;
+      if (Number(s?.upgrade_recommended_count || 0) > 0) n += 1;
+      return n;
     }
-    return Math.max(4, Math.min(14, n));
-  }, [canLiveIntel, aiIntel.summary, intel.fraudPending, intel.monthlyWaste]);
+    return intel.fraudPending > 0 ? intel.fraudPending : 0;
+  }, [commandCards, canLiveIntel, aiIntel.summary, intel.fraudPending]);
 
   if (loading) {
     return (
@@ -607,12 +618,14 @@ export default function Dashboard({
         savedYtd={savedYtd}
       />
 
-      <AIFinancialCommandCenter
-        signalCount={aiSignalCount}
-        cards={commandCards}
-        loading={Boolean(canLiveIntel && aiIntel.loading)}
-        aiActive={canLiveIntel && !aiIntel.loading && Boolean(aiIntel.summary?.success)}
-      />
+      {(commandCards.length > 0 || (canLiveIntel && aiIntel.loading)) ? (
+        <AIFinancialCommandCenter
+          signalCount={aiSignalCount}
+          cards={commandCards}
+          loading={Boolean(canLiveIntel && aiIntel.loading)}
+          aiActive={canLiveIntel && !aiIntel.loading && Boolean(aiIntel.summary?.success)}
+        />
+      ) : null}
 
       {/* Row 1 — KPIs + health */}
       <section className="mt-6 grid grid-cols-1 gap-4 xl:grid-cols-12 xl:gap-6">

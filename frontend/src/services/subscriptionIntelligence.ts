@@ -76,16 +76,19 @@ export type IntelligenceInsight = {
 
 export type SavingsPayload = {
   success: boolean;
+  at_risk_subscriptions?: number;
   this_month: {
     subscriptions_cancelled: number;
     amount_saved_inr: number;
     waste_prevented_monthly_inr: number;
     waste_prevented_yearly_inr: number;
+    total_impact_monthly_inr?: number;
   };
   this_year: {
     subscriptions_cancelled: number;
     amount_saved_inr: number;
     waste_prevented_yearly_inr: number;
+    total_impact_yearly_inr?: number;
   };
   all_time: {
     subscriptions_cancelled: number;

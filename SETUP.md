@@ -59,8 +59,8 @@ If the team has deployed the app, open the URLs from the repo [README](README.md
 ### Step 1 — Clone and open the project
 
 ```bash
-git clone https://github.com/Cmsolanki29/smartspend-analytics.git
-cd smartspend-analytics
+git clone https://github.com/Cmsolanki29/final-exiqo.git
+cd final-exiqo
 ```
 
 ---
@@ -219,7 +219,7 @@ This kills stale processes, starts backend on **8002** and frontend on **3000** 
 ## Project layout (for reference)
 
 ```
-smartspend-analytics/
+final-exiqo/
 ├── backend/          # FastAPI API, ML, migrations
 ├── frontend/         # React UI (Create React App)
 ├── test samples/     # Sample bank/card PDFs for upload demo

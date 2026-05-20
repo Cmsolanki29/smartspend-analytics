@@ -12,6 +12,7 @@ Why asyncpg alongside psycopg2?
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import asyncpg
@@ -21,19 +22,14 @@ from core.config import get_settings
 logger = logging.getLogger(__name__)
 
 _pool: asyncpg.Pool | None = None
+_runner_pool: asyncpg.Pool | None = None
+_runner_loop_id: int | None = None
 
 
-async def init_pool() -> None:
-    """Create the asyncpg connection pool.  Called once in FastAPI lifespan.
-
-    Gracefully degrades: if Postgres is unreachable (e.g., local dev without
-    Docker), the pool is not created and async DB calls will raise RuntimeError
-    with a clear message rather than a cryptic NoneType error.
-    """
-    global _pool
+async def _create_pool() -> asyncpg.Pool | None:
     settings = get_settings()
     try:
-        _pool = await asyncpg.create_pool(
+        pool = await asyncpg.create_pool(
             dsn=settings.DATABASE_URL,
             min_size=2,
             max_size=20,
@@ -41,11 +37,25 @@ async def init_pool() -> None:
             statement_cache_size=0,  # disable prepared-stmt cache for PgBouncer compat
         )
         logger.info("asyncpg pool initialised (max_size=20)")
+        return pool
     except Exception as exc:
         logger.warning(
             "asyncpg pool init failed — async DB features degraded: %s", exc
         )
-        _pool = None
+        return None
+
+
+async def init_pool() -> None:
+    """Create the asyncpg pool on the FastAPI / uvicorn event loop."""
+    global _pool
+    _pool = await _create_pool()
+
+
+async def init_runner_pool(loop: asyncio.AbstractEventLoop) -> None:
+    """Pool for sync routes that run coroutines on the background runner thread."""
+    global _runner_pool, _runner_loop_id
+    _runner_pool = await _create_pool()
+    _runner_loop_id = id(loop)
 
 
 async def close_pool() -> None:
@@ -57,10 +67,23 @@ async def close_pool() -> None:
         logger.info("asyncpg pool closed")
 
 
+async def close_runner_pool() -> None:
+    global _runner_pool, _runner_loop_id
+    if _runner_pool is not None:
+        await _runner_pool.close()
+        _runner_pool = None
+        _runner_loop_id = None
+        logger.info("asyncpg runner pool closed")
+
+
 def get_pool() -> asyncpg.Pool:
-    """Return the active pool.  Raises RuntimeError if init_pool was never called
-    or failed — callers must handle this for graceful degradation.
-    """
+    """Return the pool bound to the current running event loop."""
+    try:
+        running = asyncio.get_running_loop()
+        if _runner_pool is not None and _runner_loop_id == id(running):
+            return _runner_pool
+    except RuntimeError:
+        pass
     if _pool is None:
         raise RuntimeError(
             "asyncpg pool is not initialised. "

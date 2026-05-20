@@ -20,7 +20,6 @@ _QUALITY_PASS_THRESHOLD = 70
 _MAX_STORED_TEXT = 500_000
 
 _TESSERACT_WINDOWS_CANDIDATES = (
-    Path(r"C:\Users\Chirag\AppData\Local\Programs\Tesseract-OCR\tesseract.exe"),
     Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe"),
     Path(r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe"),
 )
@@ -103,6 +102,8 @@ def _calculate_quality_score(result: dict[str, Any]) -> int:
 
 
 def _extract_pdf_monster(content: bytes) -> dict[str, Any]:
+    """pdfplumber (+ optional fitz). OCR per-page only when not in fast-upload mode."""
+    fast = _fast_upload_enabled()
     results: dict[str, Any] = {
         "file_type": "pdf",
         "pages": [],
@@ -146,7 +147,8 @@ def _extract_pdf_monster(content: bytes) -> dict[str, Any]:
                 except Exception as exc:
                     logger.warning("Text extraction failed page %s: %s", i, exc)
 
-                if len(page_text.strip()) < 50:
+                # Fast upload: skip Tesseract (5–15s/page) when pdfplumber already has table/text.
+                if not fast and len(page_text.strip()) < 50:
                     ocr_text = _ocr_pdf_page(content, i)
                     if len(ocr_text.strip()) > len(page_text.strip()):
                         page_text = ocr_text
@@ -166,34 +168,41 @@ def _extract_pdf_monster(content: bytes) -> dict[str, Any]:
 
     plumber_text = "\n".join(all_text_parts)
 
-    try:
-        import fitz
+    # Fast upload: one engine only — avoid re-opening PDF with fitz (saves ~1–2s).
+    if fast and len(plumber_text.strip()) > 100:
+        results["text"] = plumber_text
+        results["method"] = (
+            "pdfplumber_tables" if "pdfplumber_tables" in methods_used else "pdfplumber_text"
+        )
+    else:
+        try:
+            import fitz
 
-        doc = fitz.open(stream=content, filetype="pdf")
-        fitz_parts = [page.get_text("text") or "" for page in doc]
-        doc.close()
-        fitz_text = "\n".join(fitz_parts)
+            doc = fitz.open(stream=content, filetype="pdf")
+            fitz_parts = [page.get_text("text") or "" for page in doc]
+            doc.close()
+            fitz_text = "\n".join(fitz_parts)
 
-        if len(fitz_text.strip()) > len(plumber_text.strip()) * 1.2:
-            results["text"] = fitz_text
-            results["method"] = "fitz"
-            if not results["pages"]:
-                results["pages"] = [
-                    {"page": i + 1, "text": t, "method": "fitz", "char_count": len(t)}
-                    for i, t in enumerate(fitz_parts)
-                ]
-        else:
+            if len(fitz_text.strip()) > len(plumber_text.strip()) * 1.2:
+                results["text"] = fitz_text
+                results["method"] = "fitz"
+                if not results["pages"]:
+                    results["pages"] = [
+                        {"page": i + 1, "text": t, "method": "fitz", "char_count": len(t)}
+                        for i, t in enumerate(fitz_parts)
+                    ]
+            else:
+                results["text"] = plumber_text
+                results["method"] = (
+                    "pdfplumber_tables" if "pdfplumber_tables" in methods_used else "pdfplumber_text"
+                )
+        except ImportError:
             results["text"] = plumber_text
-            results["method"] = (
-                "pdfplumber_tables" if "pdfplumber_tables" in methods_used else "pdfplumber_text"
-            )
-    except ImportError:
-        results["text"] = plumber_text
-        results["method"] = methods_used[0] if methods_used else "pdfplumber"
-    except Exception as exc:
-        logger.warning("PyMuPDF failed: %s", exc)
-        results["text"] = plumber_text
-        results["method"] = methods_used[0] if methods_used else "pdfplumber"
+            results["method"] = methods_used[0] if methods_used else "pdfplumber"
+        except Exception as exc:
+            logger.warning("PyMuPDF failed: %s", exc)
+            results["text"] = plumber_text
+            results["method"] = methods_used[0] if methods_used else "pdfplumber"
 
     results["tables"] = all_tables
     if not results.get("page_count"):
@@ -652,22 +661,125 @@ def _vision_read_page(img_b64: str, mime_type: str = "image/png") -> str:
 # ── Retry cascade ─────────────────────────────────────────────────────────────
 
 
-def extract_with_retry(
+def _fast_upload_enabled() -> bool:
+    return os.getenv("SMARTSPEND_FAST_UPLOAD", "1").lower() in ("1", "true", "yes")
+
+
+def _is_image_extension(ext: str) -> bool:
+    return ext in ("jpg", "jpeg", "png", "tiff", "bmp", "webp", "gif", "heic")
+
+
+def extract_text_cascade(
     content: bytes,
     filename: str,
-    user_id: int,
-    doc_id: int,
-    conn,
+    *,
+    fast_upload: bool | None = None,
 ) -> dict[str, Any]:
+    """
+    Multisource text extraction (same cascade as onboarding uploads) without DB writes.
+    Used by AI chat uploads so images get OCR (Tesseract) + vision (Gemini/OpenAI).
+    """
+    use_fast = _fast_upload_enabled() if fast_upload is None else bool(fast_upload)
+    ext = get_extension(filename)
+    # Images / receipts: always run full cascade (OCR → vision), never fast-single-pass.
+    if _is_image_extension(ext):
+        use_fast = False
+
     methods: list[tuple[str, Callable[[], dict[str, Any]]]] = [
         ("primary", lambda: extract_text_monster(content, filename)),
         ("alternate_engine", lambda: _alternate_extraction(content, filename)),
         ("ocr_forced", lambda: _force_ocr_extraction(content, filename)),
         ("vision_api", lambda: _vision_api_extraction(content, filename)),
     ]
+    if use_fast and ext in ("pdf", "csv", "xlsx", "xls", "txt", "text"):
+        methods = methods[:1]
 
     best_result: dict[str, Any] | None = None
     best_score = 0
+    fast_pass_threshold = 50
+
+    for attempt, (method_name, extract_fn) in enumerate(methods, 1):
+        try:
+            result = extract_fn()
+            gate = quality_gate(result, original_content=content)
+            result["quality_score"] = gate["score"]
+            result["quality_checks"] = gate["checks"]
+            result["quality_issues"] = gate["issues"]
+            result["attempt_number"] = attempt
+            result["retry_method"] = method_name
+
+            if gate["score"] > best_score:
+                best_score = gate["score"]
+                best_result = result
+
+            if gate["passed"] or (use_fast and gate["score"] >= fast_pass_threshold):
+                logger.info(
+                    "Cascade PASSED attempt %s (%s) score=%s fast=%s file=%s",
+                    attempt,
+                    method_name,
+                    gate["score"],
+                    use_fast,
+                    filename,
+                )
+                return best_result or result
+            logger.info(
+                "Cascade FAILED attempt %s (%s) score=%s issues=%s",
+                attempt,
+                method_name,
+                gate["score"],
+                gate["issues"],
+            )
+        except Exception as exc:
+            logger.error("Cascade attempt %s (%s) crashed: %s", attempt, method_name, exc)
+
+    if best_result:
+        logger.warning("Cascade below threshold; returning best score=%s method=%s", best_score, best_result.get("method"))
+        return best_result
+
+    return {
+        "text": "",
+        "method": "all_failed",
+        "quality_score": 0,
+        "error": "All extraction methods failed. Document may need manual review.",
+        "file_type": ext,
+        "pages": [],
+        "tables": [],
+    }
+
+
+def extract_with_retry(
+    content: bytes,
+    filename: str,
+    user_id: int,
+    doc_id: int,
+    conn,
+    *,
+    fast_upload: bool | None = None,
+) -> dict[str, Any]:
+    """
+    Monster text-extraction cascade (pdfplumber → alt engine → OCR → vision).
+
+    ``fast_upload`` (default on via SMARTSPEND_FAST_UPLOAD): stop after the first
+    good pass so signup/settings uploads finish in ~10–15s instead of running
+    OCR + vision on every file.
+    """
+    use_fast = _fast_upload_enabled() if fast_upload is None else bool(fast_upload)
+    ext = get_extension(filename)
+    if _is_image_extension(ext):
+        use_fast = False
+
+    methods: list[tuple[str, Callable[[], dict[str, Any]]]] = [
+        ("primary", lambda: extract_text_monster(content, filename)),
+        ("alternate_engine", lambda: _alternate_extraction(content, filename)),
+        ("ocr_forced", lambda: _force_ocr_extraction(content, filename)),
+        ("vision_api", lambda: _vision_api_extraction(content, filename)),
+    ]
+    if use_fast and ext in ("pdf", "csv", "xlsx", "xls", "txt", "text"):
+        methods = methods[:1]
+
+    best_result: dict[str, Any] | None = None
+    best_score = 0
+    fast_pass_threshold = 50
 
     for attempt, (method_name, extract_fn) in enumerate(methods, 1):
         try:
@@ -685,12 +797,13 @@ def extract_with_retry(
                 best_score = gate["score"]
                 best_result = result
 
-            if gate["passed"]:
+            if gate["passed"] or (use_fast and gate["score"] >= fast_pass_threshold):
                 logger.info(
-                    "Quality gate PASSED attempt %s (%s) score=%s",
+                    "Quality gate PASSED attempt %s (%s) score=%s fast=%s",
                     attempt,
                     method_name,
                     gate["score"],
+                    use_fast,
                 )
                 return best_result or result
             logger.info(
@@ -827,8 +940,11 @@ def _vision_api_extraction(content: bytes, filename: str) -> dict[str, Any]:
                 "page_count": len(pages),
                 "quality_score": 0,
             }
+        mime = "image/jpeg" if ext in ("jpg", "jpeg") else "image/png"
+        if ext == "webp":
+            mime = "image/webp"
         img_b64 = base64.b64encode(content).decode()
-        text = _vision_read_page(img_b64, "image/png")
+        text = _vision_read_page(img_b64, mime)
         return {
             "file_type": ext,
             "text": text,

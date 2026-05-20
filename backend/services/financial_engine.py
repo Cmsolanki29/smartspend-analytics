@@ -85,12 +85,34 @@ def recalculate_financial_state(
     monthly_income  = float(row[0])
     fixed_expenses  = float(row[1])
 
-    # ── 2. EMI burden (active recurring debits detected) ─────────────────────
-    cur.execute(
-        "SELECT COALESCE(SUM(detected_amount),0) FROM emi_records WHERE user_id=%s AND is_active=TRUE",
-        (user_id,),
-    )
-    total_emi_outgo = float(cur.fetchone()[0])
+    # ── 2. EMI burden (manual emis + scanned emi_records) ────────────────────
+    emis_sum = 0.0
+    records_sum = 0.0
+    try:
+        cur.execute(
+            """
+            SELECT COALESCE(SUM(emi_amount), 0)::float FROM emis
+            WHERE user_id = %s AND LOWER(COALESCE(status, 'active')) = 'active';
+            """,
+            (user_id,),
+        )
+        emis_sum = float((cur.fetchone() or [0])[0] or 0)
+    except Exception:
+        pass
+    try:
+        cur.execute(
+            "SELECT COALESCE(SUM(detected_amount),0) FROM emi_records WHERE user_id=%s AND is_active=TRUE",
+            (user_id,),
+        )
+        records_sum = float((cur.fetchone() or [0])[0] or 0)
+    except Exception:
+        pass
+    if records_sum > 0 and emis_sum > 0:
+        total_emi_outgo = emis_sum + records_sum
+    elif records_sum > 0:
+        total_emi_outgo = records_sum
+    else:
+        total_emi_outgo = emis_sum
 
     # ── 3. Purchase goals monthly reserve ────────────────────────────────────
     cur.execute(
@@ -273,7 +295,20 @@ def recalculate_financial_state(
     except Exception:
         pass
 
-    return {"snapshot_id": snap_id, **breakdown}
+    health_payload: dict[str, Any] = {}
+    try:
+        from services.scorer import refresh_user_health_score
+
+        hs = refresh_user_health_score(conn, user_id, month, year)
+        health_payload = {
+            "health_score": hs.score,
+            "health_grade": hs.grade,
+            "health_trend": hs.trend,
+        }
+    except Exception:
+        pass
+
+    return {"snapshot_id": snap_id, **breakdown, **health_payload}
 
 
 def get_latest_snapshot(conn, user_id: int) -> dict[str, Any]:

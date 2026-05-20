@@ -116,15 +116,10 @@ class PipelineResult:
 
 
 def _run_async(coro: Any) -> Any:
-    """Run async coroutine from sync FastAPI routes."""
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coro)
-    import concurrent.futures
+    """Run async coroutine on the dedicated background event-loop thread."""
+    from services.async_runner import run_coroutine
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(asyncio.run, coro).result(timeout=45)
+    return run_coroutine(coro, timeout=30.0)
 
 
 def assemble_features_sync(txn: dict[str, Any], user_history: dict[str, Any]) -> dict[str, Any]:
@@ -380,8 +375,15 @@ def score_transaction_sync(
     *,
     conn=None,
     txn_id: Optional[int] = None,
+    lightweight: bool = False,
 ) -> PipelineResult:
-    """Score one transaction through rules + ML + graph + orchestrator."""
+    """
+    Score one transaction through rules + ML (+ graph) + optional orchestrator.
+
+    ``lightweight=True``: rules + hybrid ML only (used by background batch worker).
+    ``lightweight=False``: full pipeline including decision engine + phase-12 orchestrator
+    (used by live check-transaction).
+    """
     from routes.fraud_shield import calculate_fraud_risk_score
     from services.hybrid_scorer import hybrid_scorer
     from services.ml_model import ml_detector
@@ -468,6 +470,16 @@ def score_transaction_sync(
     out.feature_scores = build_feature_explanations(
         features, user_history, str(txn.get("payee") or txn.get("merchant") or ""), out.risk_factors
     )
+
+    if lightweight:
+        out.decision_action = _sync_decide(out.risk_score, txn)
+        out.final_action = out.decision_action
+        out.orchestrator = {
+            "tier_label": "Tier 1 — Rules + IF (batch)",
+            "decision": out.final_action.upper(),
+            "models_used": out.models_used,
+        }
+        return out
 
     # Phase 4 decision engine (async) with sync fallback
     user_dict = {"id": user_id}
@@ -595,69 +607,14 @@ async def publish_batch_scored(user_id: int, count: int) -> None:
         logger.debug("publish_batch_scored skipped: %s", exc)
 
 
-def run_post_upload_pipeline(user_id: int, conn) -> dict[str, Any]:
-    """After statement import: train IF, score scoped txns, register model, emit events."""
-    from services.fraud_from_transactions import score_scoped_transactions
-    from services.ml_model import ml_detector
+def run_post_upload_pipeline(user_id: int, conn, *, document_id: int | None = None) -> dict[str, Any]:
+    """After statement import: queue background batch scoring (non-blocking)."""
+    from services.fraud_batch_scorer import schedule_fraud_batch_score
 
-    summary: dict[str, Any] = {"trained": False, "scored": 0, "high_risk": 0}
-    try:
-        summary["trained"] = bool(ml_detector.train(user_id))
-        det = ml_detector.detect_and_update(user_id, process_all=False)
-        summary["ml_processed"] = det.get("processed", 0)
-        summary["high_risk"] = det.get("high_risk", 0)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("post_upload ML train failed uid=%s: %s", user_id, exc)
+    summary: dict[str, Any] = {"scored": 0, "high_risk": 0, "mode": "background"}
+    schedule_fraud_batch_score(user_id, document_id=document_id)
+    summary["fraud_batch_scheduled"] = True
 
-    try:
-        from services.ml_registry.registry import model_registry
-
-        if user_id in ml_detector.models:
-            model_registry.register_model(
-                ml_detector.models[user_id],
-                name=f"if_user_{user_id}",
-                metrics={"samples": summary.get("ml_processed", 0)},
-                hyperparams={"type": "IsolationForest"},
-            )
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("model registry register skipped: %s", exc)
-
-    cur = conn.cursor()
-    try:
-        alerts = score_scoped_transactions(cur, user_id, limit=200, min_risk=50)
-        summary["scored"] = len(alerts)
-        for a in alerts[:25]:
-            tid = a.get("transaction_id")
-            if tid is None:
-                continue
-            pr = PipelineResult(
-                risk_score=int(a.get("risk_score") or 0),
-                risk_level=_risk_level(int(a.get("risk_score") or 0)),
-                pattern_matched=a.get("pattern_matched"),
-            )
-            try:
-                _run_async(
-                    publish_transaction_scored(
-                        user_id, int(tid), pr, reason=str(a.get("warning_message") or "")
-                    )
-                )
-            except Exception:
-                pass
-    finally:
-        cur.close()
-
-    try:
-        _run_async(publish_batch_scored(user_id, summary["scored"]))
-    except Exception:
-        pass
-
-    # Phase 2: on-demand feature materialize (async) + sync fallback
-    try:
-        from workers.feature_materializer import feature_materializer
-
-        _run_async(feature_materializer.materialize_now("user", str(user_id)))
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("materialize_now skipped: %s", exc)
     try:
         from services.feature_store.sync_materializer import materialize_user_sync
 

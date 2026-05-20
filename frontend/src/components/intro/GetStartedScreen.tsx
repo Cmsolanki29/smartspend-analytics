@@ -1,5 +1,5 @@
 import { motion, useReducedMotion } from "framer-motion";
-import { ArrowRight, BadgeCheck, Landmark, ShieldCheck } from "lucide-react";
+import { ArrowLeft, ArrowRight, BadgeCheck, Landmark, ShieldCheck } from "lucide-react";
 import { AuroraBackground } from "./AuroraBackground";
 import { GlassCard } from "./GlassCard";
 import { GradientButton } from "./GradientButton";
@@ -10,12 +10,15 @@ const BRAND_EASE = [0.22, 1, 0.36, 1] as const;
 export type GetStartedScreenProps = {
   onCreate: () => void;
   onSignIn: () => void;
+  /** Demo: replay splash animation from the welcome screen. */
+  onBackToSplash?: () => void;
   shieldLayoutId?: string;
 };
 
 export function GetStartedScreen({
   onCreate,
   onSignIn,
+  onBackToSplash,
   shieldLayoutId = "ssShieldMark",
 }: GetStartedScreenProps) {
   const reduce = useReducedMotion();
@@ -37,8 +40,21 @@ export function GetStartedScreen({
 
       {/* Top mini navbar with morphing logo */}
       <header className="absolute inset-x-0 top-0 z-10 flex items-center justify-between px-5 pt-5 md:px-10 md:pt-7">
+        {onBackToSplash ? (
+          <button
+            type="button"
+            onClick={onBackToSplash}
+            className="flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.05] px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.16em] text-white/75 backdrop-blur-md transition hover:border-white/25 hover:bg-white/[0.08] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60"
+          >
+            <ArrowLeft size={13} />
+            Back
+          </button>
+        ) : (
+          <span aria-hidden />
+        )}
         <div className="flex items-center gap-2.5">
-          <ShieldMark layoutId={shieldLayoutId} stage="complete" size={36} />
+          {/* No layoutId — avoids Framer FLIP clash when Back replays splash. */}
+          <ShieldMark stage="complete" size={36} />
           <span className="font-heading text-base font-semibold tracking-tight text-white">
             SmartSpend
           </span>

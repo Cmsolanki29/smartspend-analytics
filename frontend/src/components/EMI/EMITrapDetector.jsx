@@ -27,6 +27,7 @@ import {
   postEmiAffordabilityCheck,
   postponePurchaseGoal,
   postPurchasePostponeGoal,
+  deactivateEmiRecord,
   scanEmi,
   waitForBackendReady,
 } from "../../services/api";
@@ -41,6 +42,7 @@ import { HeroKpiTile } from "../Dashboard/shared/HeroKpiTile";
 import { SectionTitle } from "../Dashboard/shared/SectionTitle";
 import { inr } from "../../lib/format";
 import LoanEmiCalculator from "./LoanEmiCalculator";
+import { syncHealthScoreAfterMutation } from "../../utils/financialSync";
 
 const ACCENT = "#DC2626";
 
@@ -69,14 +71,8 @@ function EmiTypeIcon({ type, className }) {
   return <CreditCard className={cn} aria-hidden />;
 }
 
-function dispatchPurchaseGoalsChanged(userId) {
-  try {
-    window.dispatchEvent(new CustomEvent("smartspend:purchase-goals-changed", { detail: { userId } }));
-    window.dispatchEvent(new CustomEvent("smartspend-financial-sync", { detail: { userId } }));
-    window.dispatchEvent(new CustomEvent("smartspend:health-score-changed", { detail: { userId } }));
-  } catch {
-    /* ignore */
-  }
+function dispatchFinancialRefresh(userId, viewMode) {
+  syncHealthScoreAfterMutation(userId, { scope: viewMode }).catch(() => {});
 }
 
 export default function EMITrapDetector({ userId }) {
@@ -96,6 +92,7 @@ export default function EMITrapDetector({ userId }) {
   const [selectedGoalId, setSelectedGoalId] = useState(null);
   const [confirmPlan, setConfirmPlan] = useState(null);
   const [successState, setSuccessState] = useState(null); // {itemName, fromDate, toDate, freedAmount}
+  const [removingMerchant, setRemovingMerchant] = useState(null);
 
   useEffect(() => {
     const s = checkResult?.suggestion;
@@ -234,12 +231,33 @@ export default function EMITrapDetector({ userId }) {
   const ratioColor = ratio >= 40 ? "#ef4444" : ratio >= 30 ? "#f59e0b" : "#10b981";
   const gaugeData = useMemo(() => [{ name: "dti", value: Math.min(Math.max(ratio, 0), 100), fill: ratioColor }], [ratio, ratioColor]);
 
+  const removeEmi = async (merchant) => {
+    if (!merchant) return;
+    setRemovingMerchant(merchant);
+    try {
+      const emi = emis.find((e) => e.merchant === merchant);
+      await deactivateEmiRecord(userId, {
+        merchant,
+        amount: emi?.amount,
+        dismiss_key: emi?.dismiss_key,
+      });
+      await load();
+      await syncHealthScoreAfterMutation(userId, { scope: viewMode });
+      showToast("EMI removed — health score updated", "success");
+    } catch (e) {
+      showToast(e?.message || "Could not remove EMI", "error");
+    } finally {
+      setRemovingMerchant(null);
+    }
+  };
+
   const runScan = async () => {
     setScanLoading(true);
     try {
       await scanEmi(userId);
       await load();
       await loadCross();
+      await syncHealthScoreAfterMutation(userId, { scope: viewMode });
     } finally {
       setScanLoading(false);
     }
@@ -305,7 +323,7 @@ export default function EMITrapDetector({ userId }) {
         toDate,
         freedAmount: Math.max(0, freedAmount),
       });
-      dispatchPurchaseGoalsChanged(userId);
+      dispatchFinancialRefresh(userId, viewMode);
       await loadCross();
       await rerunCheckAfterPostpone();
     } catch (e) {
@@ -483,6 +501,14 @@ export default function EMITrapDetector({ userId }) {
                   <p className="mt-1 inline-block rounded-full border border-[#7C3AED]/30 bg-[#7C3AED]/10 px-2.5 py-0.5 text-[11px] font-medium text-exiqo-glow">
                     Next due ~{emi.next_due || "—"}
                   </p>
+                  <button
+                    type="button"
+                    onClick={() => removeEmi(emi.merchant)}
+                    disabled={removingMerchant === emi.merchant}
+                    className="mt-1 text-[11px] font-semibold text-rose-300/90 underline-offset-2 hover:text-rose-200 hover:underline disabled:opacity-50"
+                  >
+                    {removingMerchant === emi.merchant ? "Removing…" : "Remove from tracker"}
+                  </button>
                 </div>
               </li>
             ))}

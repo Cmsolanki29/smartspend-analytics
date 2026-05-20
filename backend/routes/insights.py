@@ -18,7 +18,12 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from db import get_connection, get_db
-from services.dashboard_scope import fetch_dashboard_mode, normalize_dashboard_mode, transaction_scope_sql
+from services.dashboard_scope import (
+    fetch_dashboard_mode,
+    normalize_dashboard_mode,
+    resolve_scope_mode,
+    transaction_scope_sql,
+)
 from services.openai_service import (
     explain_anomaly_transaction,
     generate_health_narrative,
@@ -29,6 +34,7 @@ from services.openai_service import (
     set_cached_insight,
     simulate_financial_scenario,
 )
+from services.financial_behavior import fetch_planning_snapshot
 from services.scorer import calculate_health_score
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -135,7 +141,9 @@ def build_user_data(
             anomaly_count = int(cur.fetchone()[0] or 0)
 
         hs_live = calculate_health_score(conn, user_id, month, year, scope=mode)
-        health_score = int(hs_live.score)
+        health_score = int(hs_live.score or 0)
+        income_basis = max(total_income, monthly_income)
+        planning_snapshot = fetch_planning_snapshot(cur, user_id, income_basis=income_basis)
 
         cur.execute(
             f"""
@@ -228,7 +236,102 @@ def build_user_data(
             "top_merchants": top_merchants,
             "last_month_expense": last_month_expense,
             "last_month_saved": last_month_saved,
+            "planning_snapshot": planning_snapshot,
+            "health_components": hs_live.components or {},
         }
+    finally:
+        cur.close()
+
+
+def _fast_user_data_for_insights(
+    conn,
+    user_id: int,
+    month: int,
+    year: int,
+    scope_mode: str,
+) -> dict[str, Any] | None:
+    """
+    Fast path when full build_user_data is slow (DB blocked by background fraud scoring).
+    Uses monthly_summary only — skips calculate_health_score().
+    """
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT name, email, monthly_income::float, savings_goal::float FROM users WHERE id = %s;",
+            (user_id,),
+        )
+        ur = cur.fetchone()
+        if not ur:
+            return None
+        name, email, monthly_income, savings_goal = ur
+        cur.execute(
+            """
+            SELECT COALESCE(total_income, 0)::float, COALESCE(total_expense, 0)::float,
+                   COALESCE(total_saved, 0)::float, COALESCE(savings_rate, 0)::float,
+                   COALESCE(health_score, 75)::int, COALESCE(anomaly_count, 0)::int
+            FROM monthly_summary
+            WHERE user_id = %s AND month = %s AND year = %s;
+            """,
+            (user_id, month, year),
+        )
+        ms = cur.fetchone()
+        if ms:
+            total_income, total_expense, total_saved, savings_rate, health_score, anomaly_count = ms
+        else:
+            scope_sql = transaction_scope_sql("t", scope_mode)
+            cur.execute(
+                f"""
+                SELECT COALESCE(SUM(CASE WHEN t.type = 'CREDIT' THEN t.amount ELSE 0 END), 0)::float,
+                       COALESCE(SUM(CASE WHEN t.type = 'DEBIT' THEN t.amount ELSE 0 END), 0)::float
+                FROM transactions t
+                WHERE t.user_id = %s
+                  AND EXTRACT(MONTH FROM t.transaction_date)::int = %s
+                  AND EXTRACT(YEAR FROM t.transaction_date)::int = %s
+                  AND ({scope_sql});
+                """,
+                (user_id, month, year),
+            )
+            inc, exp = cur.fetchone()
+            total_income = float(inc or 0)
+            total_expense = float(exp or 0)
+            total_saved = round(total_income - total_expense, 2)
+            savings_rate = round(total_saved / total_income * 100, 2) if total_income > 0 else 0.0
+            health_score = 75
+            anomaly_count = 0
+        try:
+            hs_fast = calculate_health_score(conn, user_id, month, year, scope=scope_mode)
+            if hs_fast.score is not None:
+                health_score = int(hs_fast.score)
+        except Exception:
+            pass
+        return {
+            "user_id": user_id,
+            "name": name,
+            "email": email,
+            "insight_month": month,
+            "insight_year": year,
+            "insight_scope": scope_mode,
+            "monthly_income": float(monthly_income or 0),
+            "savings_goal": float(savings_goal or 0),
+            "current_month": f"{calendar.month_name[month]} {year}",
+            "total_income": float(total_income or 0),
+            "total_expense": float(total_expense or 0),
+            "total_saved": float(total_saved or 0),
+            "savings_rate": float(savings_rate or 0),
+            "health_score": int(health_score or 75),
+            "anomaly_count": int(anomaly_count or 0),
+            "category_breakdown": [],
+            "top_merchants": [],
+            "last_month_expense": 0.0,
+            "last_month_saved": 0.0,
+            "planning_snapshot": fetch_planning_snapshot(
+                cur, user_id, income_basis=max(float(total_income or 0), float(monthly_income or 0))
+            ),
+            "health_components": {},
+        }
+    except Exception:
+        _log.exception("_fast_user_data_for_insights failed user_id=%s", user_id)
+        return None
     finally:
         cur.close()
 
@@ -241,14 +344,18 @@ def _health_details_for_narrative(hs: Any) -> dict[str, Any]:
         "expense_ratio_score": int(comp.get("expense_points", 0)),
         "consistency_score": int(comp.get("consistency_points", 0)),
         "diversity_score": int(comp.get("diversity_points", 0)),
+        "emi_score": int(comp.get("emi_points", 0)),
+        "planning_score": int(comp.get("planning_points", 0)),
     }
     weakest_key = min(
         [
-            ("savings_rate_score", mapped["savings_rate_score"], 30),
-            ("anomaly_penalty", mapped["anomaly_penalty"], 20),
-            ("expense_ratio_score", mapped["expense_ratio_score"], 25),
-            ("consistency_score", mapped["consistency_score"], 15),
-            ("diversity_score", mapped["diversity_score"], 10),
+            ("savings_rate_score", mapped["savings_rate_score"], 22),
+            ("anomaly_penalty", mapped["anomaly_penalty"], 13),
+            ("expense_ratio_score", mapped["expense_ratio_score"], 18),
+            ("consistency_score", mapped["consistency_score"], 10),
+            ("diversity_score", mapped["diversity_score"], 5),
+            ("emi_score", mapped["emi_score"], 17),
+            ("planning_score", mapped["planning_score"], 15),
         ],
         key=lambda x: x[1] / max(x[2], 1),
     )[0]
@@ -262,6 +369,38 @@ def _health_details_for_narrative(hs: Any) -> dict[str, Any]:
 
 
 # --- Static paths must be registered before /{user_id} ---
+
+
+def _rule_based_recommendations(user_data: dict[str, Any]) -> dict[str, Any]:
+    """Instant recommendations when LLM waterfall times out (no invented rupee amounts)."""
+    from services.openai_service import generate_rule_based_insight_card
+
+    card = generate_rule_based_insight_card(user_data)
+    return {
+        "priority_actions": [],
+        "quick_wins": list(card.get("recommendations") or [])[:2],
+        "long_term_goals": [
+            "Build a 3-month emergency fund",
+            "Automate monthly savings on salary day",
+        ],
+        "budget_suggestion": {},
+        "monthly_challenge": "Keep discretionary spend flat vs last month",
+        "generated_by": "fallback",
+    }
+
+
+def _fallback_insights_payload(
+    user_data: dict[str, Any],
+    *,
+    reason: str = "timeout",
+) -> dict[str, Any]:
+    from services.openai_service import generate_rule_based_insight_card
+
+    card = generate_rule_based_insight_card(user_data)
+    card["generated_by"] = "fallback"
+    card["fallback_reason"] = reason
+    recs = _rule_based_recommendations(user_data)
+    return _merge_insights_payload(user_data, card, recs)
 
 
 def _merge_insights_payload(user_data: dict[str, Any], insights_card: dict, recs: dict) -> dict[str, Any]:
@@ -294,13 +433,24 @@ def _insights_payload(
         if cached is not None:
             return cached
 
-    user_data = build_user_data(conn, user_id, month, year, scope=scope_mode)
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        fi = pool.submit(generate_monthly_insights, user_data, force_refresh=force_refresh)
-        fr = pool.submit(get_personalized_recommendations, user_data)
-        insights = fi.result(timeout=90)
-        recommendations = fr.result(timeout=90)
-    payload = _merge_insights_payload(user_data, insights, recommendations)
+    user_data = _fast_user_data_for_insights(conn, user_id, month, year, scope_mode)
+    if user_data is None:
+        try:
+            user_data = build_user_data(conn, user_id, month, year, scope=scope_mode)
+        except HTTPException:
+            raise
+        except Exception:
+            _log.warning("_insights_payload slow path failed user_id=%s", user_id, exc_info=True)
+            user_data = None
+    if user_data is None:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "insights_unavailable",
+                "message": "AI insights are temporarily unavailable. Please try again in a moment.",
+            },
+        )
+    payload = _fallback_insights_payload(user_data, reason="instant")
     set_cached_insight(conn, user_id, month, year, scope_mode, payload)
     return payload
 
@@ -355,22 +505,10 @@ def insights_stream(
                     yield _sse_line({"done": True, "data": cached_payload, "cached": True})
                     return
 
-            with ThreadPoolExecutor(max_workers=1) as pool:
-                f_ud = pool.submit(build_user_data, conn, user_id, m, y, scope_mode)
-                deadline_ud = time.time() + 45
-                while not f_ud.done():
-                    if time.time() > deadline_ud:
-                        yield _sse_line(
-                            {
-                                "error": "insights_unavailable",
-                                "message": "Loading your profile is taking too long. Please try again.",
-                            }
-                        )
-                        return
-                    yield _sse_line({"pulse": True})
-                    time.sleep(0.22)
+            user_data = _fast_user_data_for_insights(conn, user_id, m, y, scope_mode)
+            if user_data is None:
                 try:
-                    user_data = f_ud.result(timeout=0)
+                    user_data = build_user_data(conn, user_id, m, y, scope_mode)
                 except HTTPException as exc:
                     yield _sse_line(
                         {
@@ -382,46 +520,24 @@ def insights_stream(
                     )
                     return
                 except Exception:
-                    _log.exception("insights-stream build_user_data failed user_id=%s", user_id)
-                    yield _sse_line(
-                        {
-                            "error": "insights_unavailable",
-                            "message": "AI insights are temporarily unavailable. Please try again in a moment.",
-                        }
+                    _log.warning(
+                        "insights-stream build_user_data failed user_id=%s",
+                        user_id,
+                        exc_info=True,
                     )
-                    return
 
-            with ThreadPoolExecutor(max_workers=2) as llm_pool:
-                fi = llm_pool.submit(generate_monthly_insights, user_data, force_refresh=True)
-                fr = llm_pool.submit(get_personalized_recommendations, user_data)
-                deadline = time.time() + 90
-                while not (fi.done() and fr.done()):
-                    if time.time() > deadline:
-                        yield _sse_line(
-                            {
-                                "error": "insights_unavailable",
-                                "message": "AI insights are temporarily unavailable. Please try again in a moment.",
-                            }
-                        )
-                        return
-                    yield _sse_line({"pulse": True})
-                    time.sleep(0.22)
-                try:
-                    insights_card = fi.result(timeout=0)
-                    recs = fr.result(timeout=0)
-                except Exception:
-                    _log.exception("insights-stream LLM jobs failed user_id=%s", user_id)
-                    yield _sse_line(
-                        {
-                            "error": "insights_unavailable",
-                            "message": "AI insights are temporarily unavailable. Please try again in a moment.",
-                        }
-                    )
-                    return
+            if user_data is None:
+                yield _sse_line(
+                    {
+                        "error": "insights_unavailable",
+                        "message": "AI insights are temporarily unavailable. Please try again in a moment.",
+                    }
+                )
+                return
 
-            payload = _merge_insights_payload(user_data, insights_card, recs)
+            payload = _fallback_insights_payload(user_data, reason="instant")
             set_cached_insight(conn, user_id, m, y, scope_mode, payload)
-            yield _sse_line({"done": True, "data": payload})
+            yield _sse_line({"done": True, "data": payload, "instant": True})
         finally:
             try:
                 conn.close()
@@ -443,6 +559,10 @@ def quick_summary(
     user_id: int,
     month: int | None = Query(None, ge=1, le=12),
     year: int | None = Query(None, ge=2000, le=2100),
+    scope: str | None = Query(
+        None,
+        description="Dashboard scope: merged | bank_only | credit_card_only",
+    ),
     conn=Depends(get_db),
 ):
     today = date.today()
@@ -459,27 +579,17 @@ def quick_summary(
             raise HTTPException(status_code=404, detail="User not found")
         display_name = r[0]
 
-        _mode = fetch_dashboard_mode(cur, user_id)
-        _scope = transaction_scope_sql("t", _mode)
+        _mode = resolve_scope_mode(cur, user_id, scope)
+        scope_sql = transaction_scope_sql("t", _mode)
 
-        cur.execute(
-            f"""
-            SELECT COALESCE(SUM(CASE WHEN t.type = 'CREDIT' THEN t.amount ELSE 0 END), 0)::float,
-                   COALESCE(SUM(CASE WHEN t.type = 'DEBIT' THEN t.amount ELSE 0 END), 0)::float
-            FROM transactions t
-            WHERE t.user_id = %s
-              AND EXTRACT(MONTH FROM t.transaction_date)::int = %s
-              AND EXTRACT(YEAR FROM t.transaction_date)::int = %s
-              AND ({_scope});
-            """,
-            (user_id, m, y),
-        )
-        inc, exp = cur.fetchone()
-        inc_f, exp_f = float(inc or 0), float(exp or 0)
-        this_month_saved = round(inc_f - exp_f, 2)
-        savings_rate = round(this_month_saved / inc_f * 100, 2) if inc_f > 0 else 0.0
+        from services.ledger_summary import fetch_ledger_summary
+        from services.scorer import calculate_health_score, health_band_for_score
 
-        hs = calculate_health_score(conn, user_id, m, y)
+        ledger = fetch_ledger_summary(cur, user_id, m, y, scope=_mode)
+        this_month_saved = float(ledger.get("month_net_inr") or 0)
+        savings_rate = float(ledger.get("savings_rate_pct") or 0)
+
+        hs = calculate_health_score(conn, user_id, m, y, scope=_mode)
 
         cur.execute(
             "SELECT COUNT(*)::int FROM alerts WHERE user_id = %s AND is_read = FALSE;",
@@ -494,7 +604,7 @@ def quick_summary(
             WHERE t.user_id = %s AND t.type = 'DEBIT'
               AND EXTRACT(MONTH FROM t.transaction_date)::int = %s
               AND EXTRACT(YEAR FROM t.transaction_date)::int = %s
-              AND ({_scope})
+              AND ({scope_sql})
             GROUP BY 1 ORDER BY 2 DESC LIMIT 1;
             """,
             (user_id, m, y),
@@ -544,12 +654,18 @@ def quick_summary(
             greet = "Good evening"
         greeting = f"{greet}, {display_name}! 👋"
 
+        band_id, band_label = health_band_for_score(hs.score) if hs.score is not None else ("UNKNOWN", "—")
         return {
             "greeting": greeting,
             "this_month_saved": this_month_saved,
+            "month_spend_inr": ledger.get("month_debit_spend_inr"),
+            "ytd_saved_inr": ledger.get("ytd_saved_inr"),
             "savings_rate": savings_rate,
             "health_score": hs.score,
             "health_grade": hs.grade,
+            "health_band": band_id,
+            "health_label": band_label,
+            "health_trend": hs.trend,
             "alerts_pending": alerts_pending,
             "top_spend_category": top_spend_category,
             "days_left_in_month": days_left_in_month,

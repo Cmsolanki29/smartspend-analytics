@@ -16,12 +16,15 @@ import logging
 from typing import Any, Literal, Optional
 from urllib.parse import parse_qs
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
+import os
+
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from db import get_db
 from services.dashboard_scope import normalize_dashboard_mode
 from services.pdf_parser import PDFParserAgent
+from utils.auth import get_current_user_id
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["documents"])
@@ -262,11 +265,38 @@ _ALLOWED_EXTENSIONS = {
 _MAX_FILE_MB = 20
 
 
+def _user_friendly_upload_error(exc: BaseException) -> str:
+    """Production-safe message — no stack traces or internal exception names for users."""
+    name = type(exc).__name__
+    low = str(exc).lower()
+    if name == "RecursionError":
+        return (
+            "We could not process this statement. Please try again, or upload a CSV export "
+            "from your bank app. If the problem continues, contact support."
+        )
+    if "no llm providers" in low or "api key" in low:
+        return (
+            "Statement import is temporarily limited. Please upload a CSV bank export, "
+            "or try again in a few minutes."
+        )
+    if any(s in low for s in ("undefinedcolumn", "column", "relation", "does not exist")):
+        return (
+            "Server database needs an update. Please try again shortly or contact support."
+        )
+    if name in ("TimeoutError", "ReadTimeout", "APITimeoutError"):
+        return "Import timed out. Try a smaller file or CSV format."
+    return (
+        "We could not import transactions from this file. Please use a clear PDF or CSV "
+        "bank/credit-card statement (max 20 MB) and try again."
+    )
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # POST /documents/upload
 # ──────────────────────────────────────────────────────────────────────────────
 @router.post("/documents/upload")
 async def upload_statement(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     user_id: int = Form(...),
     source_type: str = Form(...),
@@ -274,8 +304,11 @@ async def upload_statement(
     account_number_masked: Optional[str] = Form(None),
     added_via: Optional[str] = Form("settings_upload"),
     conn=Depends(get_db),
+    jwt_user_id: int = Depends(get_current_user_id),
 ):
     """Upload bank/credit-card statement PDF or CSV and extract transactions."""
+    if int(user_id) != int(jwt_user_id):
+        raise HTTPException(status_code=403, detail="user_id does not match authenticated user")
 
     raw = (source_type or "").strip().lower()
     syn = {"bank_statement": "bank_statement_pdf", "bank_stmt": "bank_statement_pdf", "statement": "bank_statement_pdf"}
@@ -361,6 +394,7 @@ async def upload_statement(
             document_id=doc_id,
             connected_source_id=source_id,
             conn=conn,
+            skip_duplicate_check=True,
         )
     except Exception as exc:
         logger.exception(
@@ -371,12 +405,7 @@ async def upload_statement(
         )
         PDFParserAgent._mark_failed(conn, doc_id, f"{type(exc).__name__}: {exc!s}"[:400])
         conn.commit()
-        detail = f"Import failed ({type(exc).__name__}): {exc}"
-        if any(
-            s in detail.lower()
-            for s in ("undefinedcolumn", "column", "relation", "does not exist")
-        ):
-            detail += " If this is schema drift, run: cd backend && python -m scripts.apply_migrations (028–029)."
+        detail = _user_friendly_upload_error(exc)
         raise HTTPException(status_code=500, detail=detail[:900]) from exc
 
     result["document_id"] = doc_id
@@ -386,21 +415,60 @@ async def upload_statement(
             imported = int(result.get("imported") or 0)
             source_name = str(result.get("institution") or institution_name or "Statement")
             if imported > 0:
-                from services.upload_pipeline import run_post_import_pipeline
+                from services.upload_pipeline import (
+                    run_post_import_background,
+                    run_post_import_pipeline,
+                    run_post_import_pipeline_light,
+                )
 
-                pipeline_summary = run_post_import_pipeline(
+                dr = result.get("date_range")
+                pipeline_summary = run_post_import_pipeline_light(
                     user_id,
                     conn,
                     source_name=source_name,
-                    scope=None,
-                    date_range=result.get("date_range"),
-                    purge_orphans=True,
-                    document_id=doc_id,
+                    date_range=dr,
                 )
                 result.update(pipeline_summary)
+                defer_ml = os.getenv("SMARTSPEND_DEFER_POST_UPLOAD_ML", "1").lower() in (
+                    "1",
+                    "true",
+                    "yes",
+                )
+                if defer_ml:
+                    background_tasks.add_task(
+                        run_post_import_background,
+                        user_id,
+                        source_name=source_name,
+                        scope=None,
+                        date_range=dr,
+                        purge_orphans=True,
+                        document_id=doc_id,
+                    )
+                    result["post_import"] = "background"
+                else:
+                    full = run_post_import_pipeline(
+                        user_id,
+                        conn,
+                        source_name=source_name,
+                        scope=None,
+                        date_range=dr,
+                        purge_orphans=True,
+                        document_id=doc_id,
+                    )
+                    result.update(full)
+                    result["post_import"] = "inline"
             conn.commit()
         except Exception:
             logger.exception("[upload] post-upload pipeline failed user_id=%s", user_id)
+    try:
+        from services.transaction_enrichment import latest_transaction_period
+
+        period = latest_transaction_period(conn, user_id)
+        if period:
+            result["statement_year"], result["statement_month"] = period
+    except Exception:
+        logger.debug("statement period lookup failed user_id=%s", user_id, exc_info=True)
+
     logger.warning(
         "[upload] ok document_id=%s source_id=%s success=%s imported=%s",
         doc_id,
@@ -556,7 +624,11 @@ async def toggle_source_visibility(request: Request, conn=Depends(get_db)):
 # Sets dashboard_mode + marks onboarding_completed = TRUE + optional bank link
 # ──────────────────────────────────────────────────────────────────────────────
 @router.post("/user/set-dashboard-mode")
-async def set_dashboard_mode_onboarding(request: Request, conn=Depends(get_db)):
+async def set_dashboard_mode_onboarding(
+    request: Request,
+    conn=Depends(get_db),
+    jwt_user_id: int = Depends(get_current_user_id),
+):
     """
     Used exclusively by the post-signup SourceSelection screen.
     Accepts query-params or JSON body: { user_id, dashboard_mode, bank_name? }
@@ -579,6 +651,9 @@ async def set_dashboard_mode_onboarding(request: Request, conn=Depends(get_db)):
         user_id = int(user_id_raw)
     except (ValueError, TypeError):
         raise HTTPException(status_code=400, detail="user_id must be an integer")
+
+    if user_id != jwt_user_id:
+        raise HTTPException(status_code=403, detail="user_id does not match authenticated user")
 
     dashboard_mode = _qp("dashboard_mode", "bank_only").strip().lower()
     if dashboard_mode not in ("bank_only", "credit_card_only", "merged", "upload_only"):

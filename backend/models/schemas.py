@@ -62,6 +62,8 @@ class HealthScoreResponse(BaseModel):
     grade: str = ""
     components: dict[str, Any] = Field(default_factory=dict)
     trend: str = "STABLE"
+    health_band: str = "UNKNOWN"
+    health_label: str = "—"
     recommendations: list[str] = Field(default_factory=list)
     savings_rate: Optional[float] = None
     reason: Optional[str] = None

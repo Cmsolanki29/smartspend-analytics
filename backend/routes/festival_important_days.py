@@ -14,6 +14,15 @@ from db import get_db
 router = APIRouter(prefix="/festivals", tags=["Festival important days"])
 
 HORIZON_DAYS = 183
+
+
+def _refresh_health_after_planner_change(conn, user_id: int, reason: str = "important_days_changed") -> None:
+    try:
+        from services.financial_engine import recalculate_financial_state
+
+        recalculate_financial_state(conn, user_id, reason)
+    except Exception:
+        pass
 DEFAULT_REMIND_OFFSETS = [30, 14, 7, 3, 1]
 
 
@@ -340,6 +349,7 @@ def create_important_day(user_id: int, body: ImportantDayCreate, conn=Depends(ge
     today = date.today()
     payload = _row_to_payload(row, today)
     _sync_reminder_notifications(conn, user_id, [payload])
+    _refresh_health_after_planner_change(conn, user_id, "important_day_added")
     return {"important_day": payload}
 
 
@@ -404,6 +414,7 @@ def update_important_day(
     today = date.today()
     payload = _row_to_payload(out, today)
     _sync_reminder_notifications(conn, user_id, [payload])
+    _refresh_health_after_planner_change(conn, user_id, "important_day_updated")
     return {"important_day": payload}
 
 
@@ -435,4 +446,5 @@ def delete_important_day(user_id: int, event_id: int, conn=Depends(get_db)) -> d
             raise HTTPException(404, "Important day not found")
     finally:
         cur.close()
+    _refresh_health_after_planner_change(conn, user_id, "important_day_removed")
     return {"deleted": True, "id": event_id}

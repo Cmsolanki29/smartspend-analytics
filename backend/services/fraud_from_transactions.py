@@ -179,6 +179,141 @@ def scoped_db_fraud_alerts(cur, user_id: int, scope: str | None = None) -> list[
     return out
 
 
+def alerts_from_stored_transaction_scores(
+    cur,
+    user_id: int,
+    *,
+    limit: int = 50,
+    min_risk: int = 50,
+    days: int = 120,
+    scope: str | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Fast path: use risk_score / anomaly_flag already on transactions (upload heuristics).
+    No live hybrid_scorer — avoids 500s when the API is under load.
+    """
+    mode = resolve_scope_mode(cur, user_id, scope)
+    scope_sql = transaction_scope_sql("t", mode)
+    since = date.today() - timedelta(days=days)
+    cur.execute(
+        f"""
+        SELECT t.id, t.merchant, t.description, t.amount, t.transaction_date,
+               t.transaction_time, COALESCE(t.risk_score, 0)::int,
+               t.anomaly_reason, COALESCE(t.anomaly_flag, FALSE)
+        FROM transactions t
+        WHERE t.user_id = %s
+          AND UPPER(t.type) = 'DEBIT'
+          AND t.transaction_date >= %s
+          AND ({scope_sql})
+          AND (
+            COALESCE(t.anomaly_flag, FALSE) = TRUE
+            OR COALESCE(t.risk_score, 0) >= %s
+          )
+        ORDER BY t.transaction_date DESC, t.transaction_time DESC NULLS LAST, t.id DESC
+        LIMIT %s;
+        """,
+        (user_id, since, min_risk, limit),
+    )
+    alerts: list[dict[str, Any]] = []
+    for row in cur.fetchall():
+        risk = int(row[6] or 0)
+        if risk < min_risk:
+            continue
+        tx = {
+            "id": row[0],
+            "merchant": row[1] or row[2] or "",
+            "description": row[2] or "",
+            "amount": float(row[3] or 0),
+            "transaction_date": row[4],
+            "transaction_time": row[5],
+            "payment_method": "CARD",
+            "type": "DEBIT",
+        }
+        payee = (tx.get("merchant") or tx.get("description") or "").strip()
+        td = tx["transaction_date"]
+        tt = tx.get("transaction_time")
+        if isinstance(td, date) and tt is not None:
+            at = datetime.combine(td, tt)
+        else:
+            at = datetime.now()
+        reason = (row[7] or "").strip() or "Flagged from stored risk score"
+        pattern = "ANOMALY_FLAG" if row[8] else "STORED_RISK_SCORE"
+        alerts.append(
+            {
+                "id": f"txn-{tx['id']}",
+                "transaction_id": tx["id"],
+                "pattern_matched": pattern,
+                "risk_score": risk,
+                "amount_at_risk": tx["amount"],
+                "warning_message": reason,
+                "hinglish_explanation": "",
+                "user_action": "PENDING",
+                "money_saved": 0.0,
+                "created_at": at.isoformat(),
+                "severity": _severity_from_score(risk),
+                "merchant": payee,
+                "source": "transaction_stored",
+                "flagged_by": [],
+                "models_used": {},
+            }
+        )
+    alerts.sort(key=lambda a: (-a["risk_score"], a.get("created_at") or ""))
+    return alerts
+
+
+def get_merged_fraud_alerts(
+    cur,
+    user_id: int,
+    scope: str | None = None,
+    *,
+    limit: int = 50,
+    min_risk: int = 50,
+) -> list[dict[str, Any]]:
+    """
+    Read scored fraud signals from DB (written by ``fraud_batch_scorer``).
+    Never runs live ML inside HTTP handlers — stable for every user.
+    """
+    db_alerts = scoped_db_fraud_alerts(cur, user_id, scope)
+    txn_alerts = alerts_from_stored_transaction_scores(
+        cur, user_id, limit=limit, min_risk=min_risk, scope=scope
+    )
+    return merge_alerts(db_alerts, txn_alerts)
+
+
+def get_live_events_from_db(
+    cur,
+    user_id: int,
+    *,
+    limit: int = 20,
+    scope: str | None = None,
+) -> list[dict[str, Any]]:
+    """Recent scored debits for the live feed (DB read only)."""
+    alerts = alerts_from_stored_transaction_scores(
+        cur, user_id, limit=limit, min_risk=0, scope=scope
+    )
+    events = []
+    for a in alerts:
+        risk = int(a.get("risk_score") or 0)
+        if risk >= 65:
+            st = "BLOCKED"
+        elif risk >= 35:
+            st = "REVIEW"
+        else:
+            st = "APPROVED"
+        events.append(
+            {
+                "id": a.get("id"),
+                "transaction_id": a.get("transaction_id"),
+                "merchant": a.get("merchant") or a.get("pattern_matched"),
+                "amount": a.get("amount_at_risk"),
+                "status": st,
+                "score": risk,
+                "ts": a.get("created_at"),
+            }
+        )
+    return events
+
+
 def merge_alerts(db_alerts: list[dict], txn_alerts: list[dict]) -> list[dict]:
     seen_txn: set[int] = set()
     merged: list[dict] = []

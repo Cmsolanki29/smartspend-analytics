@@ -60,6 +60,95 @@ def _emi_group_key(merchant: str, description: str, amount: float) -> str:
     return f"{m}|{round(float(amount or 0))}"
 
 
+def _ensure_emi_dismissals_table(cur) -> None:
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS emi_dismissals (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            dismiss_key VARCHAR(512) NOT NULL,
+            merchant_label VARCHAR(255),
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            UNIQUE (user_id, dismiss_key)
+        );
+        """
+    )
+
+
+def _load_dismissed_emi_keys(cur, user_id: int) -> set[str]:
+    keys: set[str] = set()
+    try:
+        _ensure_emi_dismissals_table(cur)
+        cur.execute(
+            "SELECT dismiss_key FROM emi_dismissals WHERE user_id = %s;",
+            (user_id,),
+        )
+        for (k,) in cur.fetchall():
+            if k:
+                keys.add(str(k))
+    except Exception:
+        pass
+    return keys
+
+
+def _dismiss_emi_for_user(
+    conn,
+    user_id: int,
+    merchant: str,
+    *,
+    amount: float | None = None,
+    description: str = "",
+    dismiss_key: str | None = None,
+) -> str:
+    """Persist dismissal so live detection hides this EMI for all future loads."""
+    m = (merchant or "").strip()
+    if not m:
+        raise HTTPException(400, "merchant is required")
+    key = (dismiss_key or "").strip() or _emi_group_key(m, description, float(amount or 0))
+    cur = conn.cursor()
+    try:
+        _ensure_emi_dismissals_table(cur)
+        cur.execute(
+            """
+            INSERT INTO emi_dismissals (user_id, dismiss_key, merchant_label)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (user_id, dismiss_key) DO NOTHING;
+            """,
+            (user_id, key, m[:255]),
+        )
+        cur.execute(
+            """
+            UPDATE emi_records SET is_active = FALSE
+            WHERE user_id = %s
+              AND (
+                LOWER(TRIM(merchant)) = LOWER(TRIM(%s))
+                OR merchant ILIKE %s
+              );
+            """,
+            (user_id, m, f"%{m[:120]}%"),
+        )
+        try:
+            cur.execute(
+                """
+                UPDATE emis SET status = 'cancelled'
+                WHERE user_id = %s
+                  AND LOWER(COALESCE(status, 'active')) = 'active'
+                  AND (
+                    LOWER(TRIM(loan_name)) = LOWER(TRIM(%s))
+                    OR loan_name ILIKE %s
+                    OR %s ILIKE '%%' || TRIM(loan_name) || '%%'
+                  );
+                """,
+                (user_id, m, f"%{m[:120]}%", m[:200]),
+            )
+        except Exception:
+            pass
+        conn.commit()
+    finally:
+        cur.close()
+    return key
+
+
 def _source_label(institution: str, source_type: str) -> str:
     inst = (institution or "").strip() or "Unknown source"
     st = (source_type or "").strip().lower()
@@ -315,6 +404,11 @@ def _build_emi_detection(conn, user_id: int, scope: str | None = None) -> dict[s
 
     emi_entries: list[dict[str, Any]] = []
     seen_merchants: set[str] = set()
+    cur_dismiss = conn.cursor()
+    try:
+        dismissed_keys = _load_dismissed_emi_keys(cur_dismiss, user_id)
+    finally:
+        cur_dismiss.close()
 
     for _gkey, txns in grouped.items():
         txns_sorted = sorted(txns, key=lambda x: x["date"])
@@ -324,6 +418,10 @@ def _build_emi_detection(conn, user_id: int, scope: str | None = None) -> dict[s
         source_name = _source_label(institution, source_type)
         all_descs = " ".join(t["description"] for t in txns_sorted)
         early_blob = f"{merchant} {all_descs}".lower()
+        med_amount_peek = float(statistics.median([float(t["amount"] or 0) for t in txns_sorted]) or 0)
+        dismiss_key_peek = _emi_group_key(merchant, all_descs, med_amount_peek)
+        if dismiss_key_peek in dismissed_keys:
+            continue
 
         # ── Single-occurrence path for explicitly labeled EMI/loan payments ──
         # Bank statement uploads may only cover 1 month, so we can't require a
@@ -355,6 +453,7 @@ def _build_emi_detection(conn, user_id: int, scope: str | None = None) -> dict[s
                             "next_due": _next_due_date(tx["date"].day, date.today()).isoformat(),
                             "source_name": source_name,
                             "source_type": source_type,
+                            "dismiss_key": _emi_group_key(merchant, tx.get("description") or "", tx_amount),
                         }
                     )
                     seen_merchants.add(merchant)
@@ -415,6 +514,7 @@ def _build_emi_detection(conn, user_id: int, scope: str | None = None) -> dict[s
                 "next_due": _next_due_date(med_day, date.today()).isoformat(),
                 "source_name": source_name,
                 "source_type": source_type,
+                "dismiss_key": _emi_group_key(merchant, " ".join(descriptions), med_amount),
             }
         )
 
@@ -842,6 +942,53 @@ def post_emi_affordability(user_id: int, body: AffordabilityBody, conn=Depends(g
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"affordability error: {exc}") from exc
+
+
+class _DeactivateEmiBody(BaseModel):
+    merchant: str = Field(..., min_length=1, max_length=500)
+    amount: float | None = Field(default=None, ge=0)
+    description: str | None = Field(default=None, max_length=500)
+    dismiss_key: str | None = Field(default=None, max_length=512)
+
+
+@router.patch("/{user_id}/record/deactivate")
+def deactivate_emi_record(user_id: int, body: _DeactivateEmiBody, conn=Depends(get_db)):
+    """Dismiss EMI from tracker (works even if user never ran Rescan)."""
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT 1 FROM users WHERE id = %s;", (user_id,))
+        if not cur.fetchone():
+            raise HTTPException(404, "User not found")
+    finally:
+        cur.close()
+    try:
+        key = _dismiss_emi_for_user(
+            conn,
+            user_id,
+            body.merchant,
+            amount=body.amount,
+            description=body.description or "",
+            dismiss_key=body.dismiss_key,
+        )
+        from services.financial_engine import recalculate_financial_state
+
+        snap = recalculate_financial_state(
+            conn,
+            user_id,
+            trigger_type="emi_removed",
+            trigger_summary=f"Dismissed EMI: {body.merchant}",
+        )
+        return {
+            "success": True,
+            "merchant": body.merchant,
+            "dismiss_key": key,
+            "health_score": snap.get("health_score"),
+            "health_grade": snap.get("health_grade"),
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(500, detail=f"deactivate error: {exc}") from exc
 
 
 @router.post("/{user_id}/scan")

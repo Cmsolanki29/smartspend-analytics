@@ -157,27 +157,9 @@ def signup(
         sc = (user.signup_connection or "add_later").strip().lower()
         if sc == "link_bank":
             pb = (user.primary_bank or "").strip()[:50]
-            inst = (user.primary_bank or "").strip()[:100]
-            if not inst.lower().endswith("bank") and not inst.lower().endswith("card"):
-                inst = (inst + " — Linked").strip()[:100]
             cur.execute(
                 "UPDATE users SET bank = %s, dashboard_mode = 'bank_only' WHERE id = %s",
                 (pb, user_id),
-            )
-            cur.execute(
-                """
-                INSERT INTO connected_sources (
-                  user_id, source_type, institution_name, account_number_masked,
-                  is_primary, is_visible_on_dashboard, added_via, status
-                )
-                VALUES (%s, 'bank', %s, 'Linked', TRUE, TRUE, 'signup', 'active')
-                ON CONFLICT ON CONSTRAINT connected_sources_user_inst_type_key DO UPDATE
-                  SET status = 'active',
-                      is_primary = TRUE,
-                      is_visible_on_dashboard = TRUE,
-                      added_via = 'signup'
-                """,
-                (user_id, inst),
             )
         else:
             cur.execute(

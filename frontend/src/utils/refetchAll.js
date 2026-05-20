@@ -1,8 +1,10 @@
+import { syncHealthScoreAfterMutation } from "./financialSync";
+
 /**
  * Phase 1 global refresh — upload pipeline signals clients via this event.
  * Phase 3 will also listen on Socket.IO `data_updated`.
  */
-export function dispatchDataUpdated({ userId, sourceName } = {}) {
+export function dispatchDataUpdated({ userId, sourceName, month, year, scope } = {}) {
   try {
     window.dispatchEvent(
       new CustomEvent("smartspend:data-updated", {
@@ -14,6 +16,9 @@ export function dispatchDataUpdated({ userId, sourceName } = {}) {
     );
     window.dispatchEvent(new Event("smartspend-financial-sync"));
     window.dispatchEvent(new Event("dashboardModeChanged"));
+    if (userId != null) {
+      syncHealthScoreAfterMutation(userId, { month, year, scope }).catch(() => {});
+    }
   } catch {
     /* ignore */
   }

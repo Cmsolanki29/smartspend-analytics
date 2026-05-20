@@ -63,9 +63,15 @@ function healthFromSummary(summary) {
   return {
     score: summary.health_score,
     grade: summary.health_grade,
-    trend: "STABLE",
+    trend: summary.health_trend || "STABLE",
+    health_band: summary.health_band,
+    health_label: summary.health_label,
     recommendations: [],
-    components: {},
+    components: {
+      month_net_inr: summary.this_month_saved,
+      ytd_saved_inr: summary.ytd_saved_inr,
+    },
+    savings_rate: summary.savings_rate,
   };
 }
 
@@ -140,8 +146,15 @@ export const useSmartSpend = (userId, month, year) => {
         next.health = healthFromSummary(next.summary);
       }
 
-      const criticalMissing = !next.trends?.length && !next.spending?.length && !next.summary;
-      if (warnings.length >= 5 && criticalMissing) {
+      const hasAnyKpi =
+        next.summary != null ||
+        (Array.isArray(next.trends) && next.trends.length > 0) ||
+        (Array.isArray(next.spending) && next.spending.length > 0);
+      const wave1Failed = warnings.filter((w) =>
+        /^(summary|trends|spending):/.test(w)
+      ).length;
+      const backendDown = wave1Failed >= 3 && !hasAnyKpi;
+      if (backendDown) {
         setError(
           "Dashboard data could not load. Run .\\start-dev.ps1, wait until the backend is healthy, then click Retry."
         );
@@ -149,7 +162,14 @@ export const useSmartSpend = (userId, month, year) => {
         setError("");
       }
 
-      setLoadWarnings(warnings.filter((w) => !w.includes("anomalyStats")));
+      let finalWarnings = warnings.filter((w) => !w.includes("anomalyStats"));
+      if (!hasAnyKpi && !backendDown && warnings.length > 0) {
+        finalWarnings = [
+          ...finalWarnings,
+          "No data for this month yet — pick another month or upload a statement.",
+        ];
+      }
+      setLoadWarnings(finalWarnings);
       setData({ ...next });
     } catch (err) {
       if (gen !== loadGen.current) return;
@@ -164,13 +184,41 @@ export const useSmartSpend = (userId, month, year) => {
   }, [load]);
 
   useEffect(() => {
+    let debounceId = null;
     const handler = (ev) => {
       const uid = Number(ev?.detail?.user_id);
       if (uid && uid !== Number(userId)) return;
-      load();
+      window.clearTimeout(debounceId);
+      debounceId = window.setTimeout(() => load(), 2000);
+    };
+    const onHealth = (ev) => {
+      const d = ev?.detail;
+      if (d?.userId != null && Number(d.userId) !== Number(userId)) return;
+      if (d?.score != null) {
+        setData((prev) => ({
+          ...prev,
+          health: {
+            ...(prev.health || {}),
+            score: d.score,
+            grade: d.grade ?? prev.health?.grade,
+            trend: d.trend ?? prev.health?.trend,
+            health_band: d.health_band ?? prev.health?.health_band,
+            health_label: d.health_label ?? prev.health?.health_label,
+          },
+        }));
+      }
+      window.clearTimeout(debounceId);
+      debounceId = window.setTimeout(() => load(), 800);
     };
     window.addEventListener("smartspend:data-updated", handler);
-    return () => window.removeEventListener("smartspend:data-updated", handler);
+    window.addEventListener("smartspend:health-score-changed", onHealth);
+    window.addEventListener("smartspend-financial-sync", handler);
+    return () => {
+      window.clearTimeout(debounceId);
+      window.removeEventListener("smartspend:data-updated", handler);
+      window.removeEventListener("smartspend:health-score-changed", onHealth);
+      window.removeEventListener("smartspend-financial-sync", handler);
+    };
   }, [userId, load]);
 
   return {

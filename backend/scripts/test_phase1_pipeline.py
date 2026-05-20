@@ -17,6 +17,18 @@ def test_parser_utils() -> None:
     assert row["category"] == "Food & Dining"
     assert row["normalized_merchant"] == merchant_prefix_key("ZOMATO LIMITED")
     assert stored_category_for_merchant("NETFLIX SUB") == "Entertainment"
+    # Regression: unknown merchant + LLM category must not recurse (upload RecursionError)
+    assert (
+        stored_category_for_merchant("XYZ UNKNOWN MERCHANT", "food")
+        == "Food & Dining"
+    )
+    enrich_transaction_row(
+        {
+            "merchant": "RANDOM MERCHANT ABC",
+            "description": "UPI payment",
+            "category": "utilities",
+        }
+    )
     print("  ok parser_utils + transaction_upsert")
 
 

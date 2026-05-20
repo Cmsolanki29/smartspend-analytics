@@ -36,6 +36,7 @@ from services.subscription_intelligence.connected_apps_sync import (
     log_subscription_event,
     sync_connected_apps_for_user,
 )
+from services.subscription_intelligence.linked_apps import fetch_linked_packages
 from services.subscription_intelligence.insight_feed import (
     fetch_intelligence_insights,
     mark_insight_read,
@@ -200,18 +201,10 @@ def _usage_rollups(conn, user_id: int, since: date) -> dict[str, list[dict[str, 
 
 
 def _waste_ledger_yearly(conn, user_id: int) -> float:
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            """
-            SELECT COALESCE(SUM(verdict_monthly_waste), 0)::float
-            FROM subscriptions WHERE user_id = %s;
-            """,
-            (user_id,),
-        )
-        return float(cur.fetchone()[0] or 0) * 12.0
-    finally:
-        cur.close()
+    from services.subscription_intelligence.savings_math import sync_at_risk_waste_fields
+
+    rollup = sync_at_risk_waste_fields(conn, user_id)
+    return float(rollup["yearly_total_inr"])
 
 
 @router.get("/health")
@@ -231,20 +224,52 @@ def get_ai_summary(
     Requires Bearer token; user_id must match JWT.
     """
     _require_self(user_id, auth_user_id)
+    linked_pkgs = fetch_linked_packages(conn, user_id)
+    if not linked_pkgs:
+        return {
+            "success": True,
+            "verdicts": {
+                "thriving": [],
+                "declining": [],
+                "dormant": [],
+                "upgrade_recommended": [],
+            },
+            "migrations": [],
+            "dashboard_signals_ready": False,
+            "summary": {
+                "subscriptions_tracked": 0,
+                "thriving_count": 0,
+                "declining_count": 0,
+                "dormant_count": 0,
+                "upgrade_recommended_count": 0,
+                "at_risk_count": 0,
+                "verdict_monthly_waste_sum_inr": 0.0,
+                "verdict_yearly_waste_sum_inr": 0.0,
+                "migrations_detected": 0,
+                "savings_amount_saved_ytd_inr": 0.0,
+                "subscriptions_cancelled_ytd": 0,
+            },
+        }
     refresh_all_subscription_verdicts(conn, user_id)
     verdicts = generate_all_verdict_reports(conn, user_id)
     migrations = detect_category_migrations(conn, user_id)
+    from services.subscription_intelligence.savings_math import sync_at_risk_waste_fields, yearly_from_monthly
+
+    rollup = sync_at_risk_waste_fields(conn, user_id)
+    waste_sum = float(rollup["monthly_total_inr"])
+    waste_yearly = float(rollup["yearly_total_inr"])
+
     cur = conn.cursor()
     try:
         cur.execute(
             """
-            SELECT COUNT(*)::int, COALESCE(SUM(verdict_monthly_waste), 0)::float
+            SELECT COUNT(*)::int
             FROM subscriptions
-            WHERE user_id = %s;
+            WHERE user_id = %s AND linked_app_package = ANY(%s::varchar[]);
             """,
-            (user_id,),
+            (user_id, linked_pkgs),
         )
-        total_subs, waste_sum = cur.fetchone()
+        total_subs = int(cur.fetchone()[0] or 0)
     finally:
         cur.close()
     saved_ytd = 0.0
@@ -272,19 +297,21 @@ def get_ai_summary(
         except Exception:
             pass
     at_risk = len(verdicts.get("declining") or []) + len(verdicts.get("dormant") or [])
+    subs_tracked = total_subs
     return {
         "success": True,
         "verdicts": verdicts,
         "migrations": migrations,
+        "dashboard_signals_ready": subs_tracked > 0,
         "summary": {
-            "subscriptions_tracked": int(total_subs or 0),
+            "subscriptions_tracked": subs_tracked,
             "thriving_count": len(verdicts.get("thriving") or []),
             "declining_count": len(verdicts.get("declining") or []),
             "dormant_count": len(verdicts.get("dormant") or []),
             "upgrade_recommended_count": len(verdicts.get("upgrade_recommended") or []),
             "at_risk_count": at_risk,
-            "verdict_monthly_waste_sum_inr": round(float(waste_sum or 0), 2),
-            "verdict_yearly_waste_sum_inr": round(float(waste_sum or 0) * 12.0, 2),
+            "verdict_monthly_waste_sum_inr": round(waste_sum, 2),
+            "verdict_yearly_waste_sum_inr": round(waste_yearly, 2),
             "migrations_detected": len(migrations),
             "savings_amount_saved_ytd_inr": round(saved_ytd, 2),
             "subscriptions_cancelled_ytd": cancelled_ytd,
@@ -371,61 +398,9 @@ def get_subscription_savings(
     auth_user_id: int = Depends(get_current_user_id),
 ) -> dict[str, Any]:
     _require_self(user_id, auth_user_id)
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            """
-            SELECT COALESCE(subscriptions_cancelled, 0), COALESCE(amount_saved, 0),
-                   COALESCE(waste_prevented_monthly, 0), COALESCE(waste_prevented_yearly, 0)
-            FROM user_subscription_savings
-            WHERE user_id = %s AND month = date_trunc('month', CURRENT_DATE)::date;
-            """,
-            (user_id,),
-        )
-        this_month = cur.fetchone() or (0, 0, 0, 0)
-        cur.execute(
-            """
-            SELECT COALESCE(SUM(subscriptions_cancelled), 0), COALESCE(SUM(amount_saved), 0),
-                   COALESCE(SUM(waste_prevented_yearly), 0)
-            FROM user_subscription_savings
-            WHERE user_id = %s AND month >= date_trunc('year', CURRENT_DATE)::date;
-            """,
-            (user_id,),
-        )
-        ytd = cur.fetchone() or (0, 0, 0)
-        cur.execute(
-            """
-            SELECT COALESCE(SUM(subscriptions_cancelled), 0), COALESCE(SUM(amount_saved), 0)
-            FROM user_subscription_savings
-            WHERE user_id = %s;
-            """,
-            (user_id,),
-        )
-        all_time = cur.fetchone() or (0, 0)
-    except Exception:
-        this_month = (0, 0, 0, 0)
-        ytd = (0, 0, 0)
-        all_time = (0, 0)
-    finally:
-        cur.close()
-    return {
-        "success": True,
-        "this_month": {
-            "subscriptions_cancelled": int(this_month[0] or 0),
-            "amount_saved_inr": float(this_month[1] or 0),
-            "waste_prevented_monthly_inr": float(this_month[2] or 0),
-            "waste_prevented_yearly_inr": float(this_month[3] or 0),
-        },
-        "this_year": {
-            "subscriptions_cancelled": int(ytd[0] or 0),
-            "amount_saved_inr": float(ytd[1] or 0),
-            "waste_prevented_yearly_inr": float(ytd[2] or 0),
-        },
-        "all_time": {
-            "subscriptions_cancelled": int(all_time[0] or 0),
-            "amount_saved_inr": float(all_time[1] or 0),
-        },
-    }
+    from services.subscription_intelligence.savings_ledger import build_savings_payload
+
+    return build_savings_payload(conn, user_id)
 
 
 @router.get("/{user_id}/hub")
@@ -433,9 +408,16 @@ def intelligence_hub(user_id: int, conn=Depends(subscription_intel_connection)):
     base = build_subscription_dashboard(user_id, conn)
     by_id = _intel_rows(conn, user_id)
     device = _device_row(conn, user_id)
+    linked_pkgs = fetch_linked_packages(conn, user_id)
     merged = _merge_by_merchant(base.get("subscriptions") or [], by_id)
+    if linked_pkgs:
+        pkg_set = set(linked_pkgs)
+        merged = [s for s in merged if (s.get("linked_app_package") or "") in pkg_set]
+        by_id = {k: v for k, v in by_id.items() if (v.get("linked_app_package") or "") in pkg_set}
     seen_m = {s["merchant"] for s in merged}
     for row in by_id.values():
+        if linked_pkgs and (row.get("linked_app_package") or "") not in set(linked_pkgs):
+            continue
         if row["merchant"] not in seen_m:
             merged.append(
                 {
@@ -514,8 +496,11 @@ def intelligence_hub(user_id: int, conn=Depends(subscription_intel_connection)):
     finally:
         cur.close()
 
-    yearly = round(_waste_ledger_yearly(conn, user_id), 2)
-    monthly_intel = round(sum(float(r.get("verdict_monthly_waste") or 0) for r in by_id.values()), 2)
+    from services.subscription_intelligence.savings_math import sync_at_risk_waste_fields
+
+    rollup = sync_at_risk_waste_fields(conn, user_id)
+    monthly_intel = float(rollup["monthly_total_inr"])
+    yearly = float(rollup["yearly_total_inr"])
     discovery_total = round(sum(float(s.get("monthly_cost") or 0) for s in merged), 2)
 
     legacy_ai = str(base.get("ai_advice") or "").strip()
@@ -534,13 +519,13 @@ def intelligence_hub(user_id: int, conn=Depends(subscription_intel_connection)):
     if _legacy_zero_waste_copy:
         legacy_ai = (
             f"Verdict-classified waste is about ₹{monthly_intel:,.0f}/month "
-            f"(₹{monthly_intel * 12:,.0f}/year) across underused subscriptions. "
+            f"(₹{yearly:,.0f}/year) across underused subscriptions. "
             f"Review declining and dormant cards first, then decide on upgrades."
         )
     elif monthly_intel > monthly_legacy + 0.5 and monthly_intel > 0.005:
         legacy_ai = (
             f"Verdict-classified waste is about ₹{monthly_intel:,.0f}/month "
-            f"(₹{monthly_intel * 12:,.0f}/year). {legacy_ai}"
+            f"(₹{yearly:,.0f}/year). {legacy_ai}"
         ).strip()
 
     return {
@@ -596,18 +581,8 @@ def post_device_link(
         cur.close()
     from services.subscription_intelligence.seed_demo import run_seed_for_user
 
-    run_seed_for_user(conn, user_id, wipe_device=False)
-    cur = conn.cursor()
-    try:
-        cur.execute("SELECT id FROM subscriptions WHERE user_id=%s ORDER BY id;", (user_id,))
-        sids = [r[0] for r in cur.fetchall()]
-    finally:
-        cur.close()
-    for sid in sids:
-        vr = evaluate_subscription(conn, sid)
-        if vr is not None:
-            persist_verdict(conn, sid, vr)
-            schedule_reminders_for_subscription(conn, sid)
+    run_seed_for_user(conn, user_id, apps_linked=body.apps_linked, wipe_device=False)
+    linked_pkgs = fetch_linked_packages(conn, user_id)
     try:
         sync_connected_apps_for_user(conn, user_id)
         log_subscription_event(
@@ -618,7 +593,12 @@ def post_device_link(
         )
     except Exception:
         pass
-    return {"ok": True, "device": _device_row(conn, user_id), "evaluated_subscriptions": len(sids)}
+    return {
+        "ok": True,
+        "device": _device_row(conn, user_id),
+        "evaluated_subscriptions": len(linked_pkgs),
+        "apps_linked": body.apps_linked or [],
+    }
 
 
 @router.post("/{user_id}/subscriptions/{subscription_id}/evaluate")

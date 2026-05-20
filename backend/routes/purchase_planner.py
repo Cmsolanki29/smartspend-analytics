@@ -18,6 +18,15 @@ from services.emi_calculator import emi_vs_cash_from_loan
 router = APIRouter(prefix="/purchases", tags=["Purchase Planner"])
 
 
+def _refresh_health_score(conn, user_id: int) -> None:
+    try:
+        from services.scorer import refresh_user_health_score
+
+        refresh_user_health_score(conn, user_id, invalidate_insights=True)
+    except Exception:
+        pass
+
+
 def _months_between(a: date, b: date) -> int:
     if b <= a:
         return 1
@@ -477,6 +486,7 @@ def add_goal(user_id: int, body: AddGoalBody, conn=Depends(get_db)):
                                     f"Purchase goal '{body.item_name}' added. Monthly pace: ₹{round(monthly_target,0):,.0f}/mo.")
     except Exception:
         pass
+    _refresh_health_score(conn, user_id)
     return result
 
 
@@ -529,6 +539,7 @@ def update_savings(user_id: int, goal_id: int, body: UpdateSavingsBody, conn=Dep
         conn.commit()
     except Exception:
         pass
+    _refresh_health_score(conn, user_id)
     return _enrich_goal(conn, user_id, row2)
 
 
@@ -669,6 +680,7 @@ def postpone_goal_by_months(user_id: int, goal_id: int, body: PostponeMonthsBody
         pass
     cur.close()
     enriched = _enrich_goal(conn, user_id, row2)
+    _refresh_health_score(conn, user_id)
     return {
         "success": True,
         "message": f"Goal “{enriched.get('item_name', '')}” moved by {body.postpone_months} month(s) to {new_td.isoformat()}.",
@@ -814,6 +826,7 @@ def postpone_purchase_goal(user_id: int, goal_id: int, body: PostponeGoalBody, c
         pass
     cur.close()
     enriched = _enrich_goal(conn, user_id, row2)
+    _refresh_health_score(conn, user_id)
     return {
         "success": True,
         "message": f"Goal “{enriched.get('item_name', '')}” target moved to {new_td.isoformat()}.",
@@ -868,6 +881,7 @@ def _complete_goal_impl(user_id: int, goal_id: int, conn) -> dict[str, Any]:
         conn.commit()
     except Exception:
         pass
+    _refresh_health_score(conn, user_id)
     return {
         "success": True,
         "status": "COMPLETED",
@@ -898,4 +912,11 @@ def cancel_goal(user_id: int, goal_id: int, conn=Depends(get_db)):
         cur.close()
         raise HTTPException(404, "Goal not found")
     cur.close()
+    try:
+        from services.financial_engine import recalculate_financial_state
+
+        recalculate_financial_state(conn, user_id, "purchase_goal_cancelled", goal_id)
+    except Exception:
+        pass
+    _refresh_health_score(conn, user_id)
     return {"success": True, "status": "CANCELLED"}

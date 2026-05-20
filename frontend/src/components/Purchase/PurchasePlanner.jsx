@@ -14,16 +14,12 @@ import { ErrorCard } from "../common/ErrorCard";
 import { SkeletonCard } from "../common/SkeletonCard";
 import { PageHeader } from "../Dashboard/shared/PageHeader";
 import { inr } from "../../lib/format";
+import { syncHealthScoreAfterMutation } from "../../utils/financialSync";
 
 const ACCENT = "#38BDF8";
 
 function dispatchPlannerSync(userId) {
-  try {
-    window.dispatchEvent(new CustomEvent("smartspend:purchase-goals-changed", { detail: { userId } }));
-    window.dispatchEvent(new CustomEvent("smartspend-financial-sync", { detail: { userId } }));
-  } catch {
-    /* ignore */
-  }
+  syncHealthScoreAfterMutation(userId).catch(() => {});
 }
 
 const fmt = (n) =>
@@ -168,6 +164,7 @@ const PurchasePlanner = ({ userId }) => {
       await deletePurchaseGoal(userId, goalId);
       await load();
       dispatchPlannerSync(userId);
+      await syncHealthScoreAfterMutation(userId);
       showToast("Purchase plan deleted.");
     } catch (e) {
       showToast(e.message || "Delete failed");

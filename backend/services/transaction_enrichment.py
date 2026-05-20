@@ -110,33 +110,61 @@ def sync_monthly_summary_for_month(conn, user_id: int, year: int, month: int) ->
         cur.close()
 
 
-def sync_monthly_summaries_for_document(conn, user_id: int, date_range: str | None) -> None:
-    """Refresh monthly_summary for months mentioned in statement period text."""
-    if not date_range:
-        sync_monthly_summary_for_month(conn, user_id, date.today().year, date.today().month)
-        return
-    # e.g. "01 May 2026 - 30 May 2026"
-    import re
+def sync_monthly_summaries_for_document(
+    conn, user_id: int, date_range: str | dict | None
+) -> None:
+    """Refresh monthly_summary — prefers full user sync (all txn months)."""
+    sync_all_monthly_summaries_for_user(conn, user_id)
 
-    m = re.search(r"([A-Za-z]+)\s+(\d{4})", date_range)
-    if not m:
-        return
-    mon_name = m.group(1).lower()[:3]
-    year = int(m.group(2))
-    month_map = {
-        "jan": 1,
-        "feb": 2,
-        "mar": 3,
-        "apr": 4,
-        "may": 5,
-        "jun": 6,
-        "jul": 7,
-        "aug": 8,
-        "sep": 9,
-        "oct": 10,
-        "nov": 11,
-        "dec": 12,
-    }
-    month = month_map.get(mon_name)
-    if month:
-        sync_monthly_summary_for_month(conn, user_id, year, month)
+
+def sync_all_monthly_summaries_for_user(conn, user_id: int) -> int:
+    """
+    Recompute monthly_summary for every calendar month that has transactions.
+    Works for any new user regardless of statement period string format.
+    """
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT DISTINCT
+              EXTRACT(YEAR FROM t.transaction_date)::int,
+              EXTRACT(MONTH FROM t.transaction_date)::int
+            FROM transactions t
+            WHERE t.user_id = %s
+              AND t.transaction_date IS NOT NULL
+            ORDER BY 1, 2;
+            """,
+            (user_id,),
+        )
+        rows = cur.fetchall()
+    finally:
+        cur.close()
+    for year, month in rows:
+        if year and month:
+            sync_monthly_summary_for_month(conn, user_id, int(year), int(month))
+    if not rows:
+        sync_monthly_summary_for_month(conn, user_id, date.today().year, date.today().month)
+    return len(rows)
+
+
+def latest_transaction_period(conn, user_id: int) -> tuple[int, int] | None:
+    """Month/year of the user's most recent transaction (for dashboard default)."""
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT EXTRACT(YEAR FROM t.transaction_date)::int,
+                   EXTRACT(MONTH FROM t.transaction_date)::int
+            FROM transactions t
+            WHERE t.user_id = %s AND t.transaction_date IS NOT NULL
+            ORDER BY t.transaction_date DESC, t.id DESC
+            LIMIT 1;
+            """,
+            (user_id,),
+        )
+        row = cur.fetchone()
+        if row and row[0] and row[1]:
+            return int(row[0]), int(row[1])
+        return None
+    finally:
+        cur.close()

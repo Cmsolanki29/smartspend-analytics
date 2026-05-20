@@ -11,6 +11,13 @@ from typing import Any
 
 from psycopg2.extensions import connection as PgConnection
 
+from services.subscription_intelligence.linked_apps import fetch_linked_packages
+from services.subscription_intelligence.savings_math import (
+    display_savings_inr,
+    estimate_cancellation_savings_inr,
+    usage_hours_from_minutes,
+)
+
 
 @dataclass
 class VerdictResult:
@@ -116,7 +123,7 @@ def evaluate_subscription(conn: PgConnection, subscription_id: int) -> VerdictRe
                 verdict="declining",
                 confidence=40,
                 reason="Link your phone usage in Device Intelligence to get personalised advice.",
-                monthly_waste=round(monthly_cost * 0.15, 2),
+                monthly_waste=estimate_cancellation_savings_inr(monthly_cost, 0.0),
                 usage_delta_30d=0.0,
                 substitution=None,
             )
@@ -164,12 +171,14 @@ def evaluate_subscription(conn: PgConnection, subscription_id: int) -> VerdictRe
         prev30_sessions = _sum_sessions(prev30_rows)
 
         # DEAD: near-zero 60d
+        hours_30 = usage_hours_from_minutes(last30_minutes)
         if last30_minutes < 5 and prev30_minutes < 5:
+            waste = float(display_savings_inr(monthly_cost, hours_30))
             return VerdictResult(
                 verdict="dead",
                 confidence=95,
                 reason="Almost no usage in the last 60 days — you may be paying for nothing.",
-                monthly_waste=round(monthly_cost, 2),
+                monthly_waste=waste,
                 usage_delta_30d=delta,
                 substitution=None,
             )
@@ -185,37 +194,43 @@ def evaluate_subscription(conn: PgConnection, subscription_id: int) -> VerdictRe
 
         if delta < -0.4 and max_growth >= 2.0 and top_sub:
             alt = top_sub.get("display_name", "another app")
+            waste = float(display_savings_inr(monthly_cost, hours_30))
             return VerdictResult(
                 verdict="dead",
                 confidence=92,
                 reason=f"You seem to be using {alt} more instead.",
-                monthly_waste=round(monthly_cost, 2),
+                monthly_waste=waste,
                 usage_delta_30d=delta,
                 substitution={"package": top_sub["package"], "label": top_sub.get("display_name", "")},
             )
 
         if last30_sessions < 2 and prev30_sessions < 4:
+            waste = float(display_savings_inr(monthly_cost, hours_30))
             return VerdictResult(
                 verdict="dormant",
                 confidence=80,
                 reason="You opened this fewer than 2 times in the last 30 days.",
-                monthly_waste=round(monthly_cost * 0.85, 2),
+                monthly_waste=waste,
                 usage_delta_30d=delta,
                 substitution=None,
             )
 
         if delta < -0.4:
             pct = abs(delta * 100)
+            waste_display = display_savings_inr(monthly_cost, hours_30)
             return VerdictResult(
                 verdict="declining",
                 confidence=75,
-                reason=f"You used this {pct:.0f}% less than the previous month.",
-                monthly_waste=round(monthly_cost * min(abs(delta), 0.95), 2),
+                reason=(
+                    f"You used this {pct:.0f}% less than the previous month. "
+                    f"You could save about ₹{waste_display} per month if you cancel."
+                ),
+                monthly_waste=float(waste_display),
                 usage_delta_30d=delta,
                 substitution=None,
             )
 
-        hours = last30_minutes / 60.0
+        hours = hours_30
         if hours > compute_pro_threshold(category) and has_pro_tier(merchant) and not (is_pro or False):
             return VerdictResult(
                 verdict="upgrade",
@@ -264,15 +279,26 @@ def persist_verdict(conn: PgConnection, subscription_id: int, vr: VerdictResult)
         cur.close()
 
 
+def _linked_pkg_clause(conn: PgConnection, user_id: int) -> tuple[str, list[str]]:
+    pkgs = fetch_linked_packages(conn, user_id)
+    if not pkgs:
+        return " AND FALSE ", []
+    return " AND s.linked_app_package = ANY(%s::varchar[]) ", pkgs
+
+
 def detect_thriving_subscriptions(conn: PgConnection, user_id: int) -> list[dict[str, Any]]:
     """
     Subscriptions with strong recent usage (>20h / 30d) and non-negative trend vs prior 30d.
     Uses DB function calculate_usage_change (migration 023).
     """
     cur = conn.cursor()
+    extra, pkgs = _linked_pkg_clause(conn, user_id)
+    params: list[Any] = [user_id]
+    if pkgs:
+        params.append(pkgs)
     try:
         cur.execute(
-            """
+            f"""
             SELECT
                 s.id,
                 s.merchant,
@@ -287,9 +313,10 @@ def detect_thriving_subscriptions(conn: PgConnection, user_id: int) -> list[dict
               AND length(trim(s.linked_app_package)) > 0
               AND COALESCE(calc.current_usage_hours, 0) > 20
               AND COALESCE(calc.change_percentage, 0) >= 0
-              AND COALESCE(s.monthly_cost, 0) > 0;
+              AND COALESCE(s.monthly_cost, 0) > 0
+              {extra};
             """,
-            (user_id,),
+            tuple(params),
         )
         out: list[dict[str, Any]] = []
         for sid, merchant, cost, cur_h, prev_h, chg in cur.fetchall():
@@ -317,9 +344,13 @@ def detect_thriving_subscriptions(conn: PgConnection, user_id: int) -> list[dict
 def detect_declining_subscriptions(conn: PgConnection, user_id: int) -> list[dict[str, Any]]:
     """Usage down more than 50% (percentage points) vs prior 30 days."""
     cur = conn.cursor()
+    extra, pkgs = _linked_pkg_clause(conn, user_id)
+    params: list[Any] = [user_id]
+    if pkgs:
+        params.append(pkgs)
     try:
         cur.execute(
-            """
+            f"""
             SELECT
                 s.id,
                 s.merchant,
@@ -332,16 +363,17 @@ def detect_declining_subscriptions(conn: PgConnection, user_id: int) -> list[dic
             WHERE s.user_id = %s
               AND s.linked_app_package IS NOT NULL
               AND length(trim(s.linked_app_package)) > 0
-              AND COALESCE(calc.change_percentage, 0) < -50;
+              AND COALESCE(calc.change_percentage, 0) < -50
+              {extra};
             """,
-            (user_id,),
+            tuple(params),
         )
         out: list[dict[str, Any]] = []
         for sid, merchant, cost, cur_h, prev_h, chg in cur.fetchall():
             cur_f = float(cur_h or 0)
             cost_f = float(cost or 0)
             chg_f = float(chg or 0)
-            waste_amount = cost_f if cur_f < 2.0 else round(cost_f * 0.7, 2)
+            waste_display = display_savings_inr(cost_f, cur_f)
             out.append(
                 {
                     "subscription_id": int(sid),
@@ -349,15 +381,15 @@ def detect_declining_subscriptions(conn: PgConnection, user_id: int) -> list[dic
                     "verdict": "declining",
                     "reasoning": (
                         f"You used this {abs(int(round(chg_f)))}% less last month. "
-                        f"You could save about ₹{int(round(waste_amount))} per month if you cancel."
+                        f"You could save about ₹{waste_display} per month if you cancel."
                     ),
                     "confidence_score": 0.85,
                     "current_usage_hours": cur_f,
                     "previous_usage_hours": float(prev_h or 0),
                     "usage_change_percentage": chg_f,
                     "monthly_cost": cost_f,
-                    "potential_monthly_savings": waste_amount,
-                    "potential_yearly_savings": round(waste_amount * 12, 2),
+                    "potential_monthly_savings": float(waste_display),
+                    "potential_yearly_savings": float(waste_display) * 12,
                 }
             )
         return out
@@ -370,9 +402,13 @@ def detect_declining_subscriptions(conn: PgConnection, user_id: int) -> list[dic
 def detect_upgrade_opportunities_for_user(conn: PgConnection, user_id: int) -> list[dict[str, Any]]:
     """High in-app time on a low/zero nominal plan - suggest paid tier when not already is_pro."""
     cur = conn.cursor()
+    extra, pkgs = _linked_pkg_clause(conn, user_id)
+    params: list[Any] = [user_id]
+    if pkgs:
+        params.append(pkgs)
     try:
         cur.execute(
-            """
+            f"""
             SELECT
                 s.id,
                 s.merchant,
@@ -391,9 +427,10 @@ def detect_upgrade_opportunities_for_user(conn: PgConnection, user_id: int) -> l
                     COALESCE(s.monthly_cost, 0) <= 0
                     OR lower(coalesce(s.merchant, '')) LIKE '%%free%%'
                     OR lower(coalesce(s.merchant, '')) LIKE '%%basic%%'
-                );
+                )
+              {extra};
             """,
-            (user_id,),
+            tuple(params),
         )
         out: list[dict[str, Any]] = []
         for sid, merchant, cost, cur_h, prev_h, _is_pro in cur.fetchall():
@@ -423,16 +460,25 @@ def detect_upgrade_opportunities_for_user(conn: PgConnection, user_id: int) -> l
 def detect_dormant_subscriptions(conn: PgConnection, user_id: int) -> list[dict[str, Any]]:
     """Delegates to evaluate_subscription for verdict == dormant (session-aware)."""
     cur = conn.cursor()
+    pkgs = fetch_linked_packages(conn, user_id)
     out: list[dict[str, Any]] = []
     try:
+        if not pkgs:
+            return []
         cur.execute(
-            "SELECT id, merchant, COALESCE(monthly_cost, 0)::float FROM subscriptions WHERE user_id = %s ORDER BY id;",
-            (user_id,),
+            """
+            SELECT id, merchant, COALESCE(monthly_cost, 0)::float
+            FROM subscriptions
+            WHERE user_id = %s AND linked_app_package = ANY(%s::varchar[])
+            ORDER BY id;
+            """,
+            (user_id, pkgs),
         )
         for sid, merchant, mc in cur.fetchall():
             vr = evaluate_subscription(conn, int(sid))
             if vr is None or vr.verdict != "dormant":
                 continue
+            waste_display = int(float(vr.monthly_waste or 0))
             out.append(
                 {
                     "subscription_id": int(sid),
@@ -441,6 +487,8 @@ def detect_dormant_subscriptions(conn: PgConnection, user_id: int) -> list[dict[
                     "reasoning": vr.reason,
                     "confidence_score": round((vr.confidence or 0) / 100.0, 2),
                     "monthly_cost": float(mc or 0),
+                    "potential_monthly_savings": float(waste_display),
+                    "potential_yearly_savings": float(waste_display) * 12,
                 }
             )
         return out
@@ -451,10 +499,20 @@ def detect_dormant_subscriptions(conn: PgConnection, user_id: int) -> list[dict[
 
 
 def refresh_all_subscription_verdicts(conn: PgConnection, user_id: int) -> int:
-    """Re-run evaluate_subscription for every row and persist plain-English reasons."""
+    """Re-run evaluate_subscription for device-linked apps only."""
+    pkgs = fetch_linked_packages(conn, user_id)
     cur = conn.cursor()
     try:
-        cur.execute("SELECT id FROM subscriptions WHERE user_id = %s ORDER BY id;", (user_id,))
+        if not pkgs:
+            return 0
+        cur.execute(
+            """
+            SELECT id FROM subscriptions
+            WHERE user_id = %s AND linked_app_package = ANY(%s::varchar[])
+            ORDER BY id;
+            """,
+            (user_id, pkgs),
+        )
         sids = [int(r[0]) for r in cur.fetchall()]
     finally:
         cur.close()

@@ -14,6 +14,12 @@ from services.subscription_intelligence import (
     persist_verdict,
     schedule_reminders_for_subscription,
 )
+from services.subscription_intelligence.linked_apps import (
+    fetch_linked_app_ids,
+    normalize_app_ids,
+    packages_for_app_ids,
+    prune_intel_outside_linked_apps,
+)
 from services.subscription_intelligence.reminder_scheduler import apply_reminder_showcase_variety
 
 
@@ -121,7 +127,44 @@ def _bulk_usage(cur, user_id: int, pkg: str, series: list[tuple[date, int, int, 
         )
 
 
-def run_seed_for_user(conn: PgConnection, user_id: int, *, wipe_device: bool = True) -> None:
+def _eval_linked_subscriptions(conn: PgConnection, user_id: int, packages: list[str]) -> None:
+    cur = conn.cursor()
+    try:
+        if packages:
+            cur.execute(
+                """
+                SELECT id FROM subscriptions
+                WHERE user_id = %s AND linked_app_package = ANY(%s::varchar[]);
+                """,
+                (user_id, packages),
+            )
+        else:
+            cur.execute("SELECT id FROM subscriptions WHERE user_id=%s AND FALSE;", (user_id,))
+        sids = [r[0] for r in cur.fetchall()]
+    finally:
+        cur.close()
+    for sid in sids:
+        vr = evaluate_subscription(conn, sid)
+        if vr is not None:
+            persist_verdict(conn, sid, vr)
+            schedule_reminders_for_subscription(conn, sid)
+
+
+def run_seed_for_user(
+    conn: PgConnection,
+    user_id: int,
+    *,
+    apps_linked: list[str] | None = None,
+    wipe_device: bool = True,
+) -> None:
+    """
+    Seed usage + subscription rows only for apps the user selected in the connect modal.
+    """
+    selected = normalize_app_ids(apps_linked) if apps_linked is not None else fetch_linked_app_ids(conn, user_id)
+    if not selected:
+        return
+
+    allowed_pkgs = packages_for_app_ids(selected)
     rnd = random.Random(42 + user_id)
     cur = conn.cursor()
     try:
@@ -131,13 +174,13 @@ def run_seed_for_user(conn: PgConnection, user_id: int, *, wipe_device: bool = T
             "DELETE FROM verdict_history WHERE subscription_id IN (SELECT id FROM subscriptions WHERE user_id=%s);",
             (user_id,),
         )
-        cur.execute("DELETE FROM app_usage_signals WHERE user_id=%s;", (user_id,))
         cur.execute("DELETE FROM subscription_intelligence_insights WHERE user_id=%s;", (user_id,))
         cur.execute("DELETE FROM subscription_events WHERE user_id=%s;", (user_id,))
         cur.execute("DELETE FROM connected_apps WHERE user_id=%s;", (user_id,))
         cur.execute("UPDATE subscriptions SET reminder_escalation_tier = 1 WHERE user_id=%s;", (user_id,))
         if wipe_device:
             cur.execute("DELETE FROM device_links WHERE user_id=%s;", (user_id,))
+        prune_intel_outside_linked_apps(conn, user_id, selected)
 
         today = date.today()
         d0 = today - timedelta(days=89)
@@ -146,13 +189,15 @@ def run_seed_for_user(conn: PgConnection, user_id: int, *, wipe_device: bool = T
             return [d0 + timedelta(days=i) for i in range(90)]
 
         all_days = days()
+        sel = set(selected)
 
         # Netflix — thriving steady ~45 min/day
         nf = []
         for d in all_days:
             base = 35 + rnd.randint(0, 25)
             nf.append((d, base, max(1, base // 25), base // 3 if d.weekday() >= 5 else 0))
-        _bulk_usage(cur, user_id, "com.netflix.mediaclient", nf)
+        if "netflix" in sel:
+            _bulk_usage(cur, user_id, "com.netflix.mediaclient", nf)
 
         # Spotify — collapse last 35 days
         sp = []
@@ -164,9 +209,10 @@ def run_seed_for_user(conn: PgConnection, user_id: int, *, wipe_device: bool = T
             else:
                 m = rnd.randint(0, 2)
             sp.append((d, m, max(1, m // 30) if m > 5 else 0, m // 4 if d.weekday() >= 5 else 0))
-        _bulk_usage(cur, user_id, "com.spotify.music", sp)
+        if "spotify" in sel:
+            _bulk_usage(cur, user_id, "com.spotify.music", sp)
 
-        # YouTube Music — rises as Spotify falls
+        # YouTube Music — rises as Spotify falls (only when both music apps linked)
         ym = []
         for i, d in enumerate(all_days):
             if i < 30:
@@ -174,42 +220,59 @@ def run_seed_for_user(conn: PgConnection, user_id: int, *, wipe_device: bool = T
             else:
                 m = 80 + rnd.randint(0, 60) + min(80, (i - 30) * 3)
             ym.append((d, m, max(1, m // 20), m // 3 if d.weekday() >= 5 else 0))
-        _bulk_usage(cur, user_id, "com.google.android.apps.youtube.music", ym)
+        if "spotify" in sel and "youtube" in sel:
+            _bulk_usage(cur, user_id, "com.google.android.apps.youtube.music", ym)
 
         # YouTube Premium (main app)
         yt = []
         for i, d in enumerate(all_days):
             m = 20 + min(120, i * 2) + rnd.randint(0, 20)
             yt.append((d, m, max(1, m // 25), m // 4 if d.weekday() >= 5 else 0))
-        _bulk_usage(cur, user_id, "com.google.android.youtube", yt)
+        if "youtube" in sel:
+            _bulk_usage(cur, user_id, "com.google.android.youtube", yt)
 
         # LinkedIn — dormant (almost no sessions)
         li = []
         for d in all_days:
             m = rnd.randint(0, 8)
             li.append((d, m, 0, 0))
-        _bulk_usage(cur, user_id, "com.linkedin.android", li)
+        if "linkedin" in sel:
+            _bulk_usage(cur, user_id, "com.linkedin.android", li)
 
         # ChatGPT — upgrade path (heavy ramp)
         cg = []
         for i, d in enumerate(all_days):
             m = 10 + int((i / 90) * 220) + rnd.randint(0, 25)
             cg.append((d, m, max(2, m // 18), m // 5 if d.weekday() >= 5 else 0))
-        _bulk_usage(cur, user_id, "com.openai.chatgpt", cg)
+        if "chatgpt" in sel or "chatgpt_plus" in sel:
+            _bulk_usage(cur, user_id, "com.openai.chatgpt", cg)
 
         # Canva — dead last 65d
         cv = []
         for i, d in enumerate(all_days):
             m = rnd.randint(15, 45) if i < 25 else rnd.randint(0, 1)
             cv.append((d, m, 1 if m > 3 else 0, 0))
-        _bulk_usage(cur, user_id, "com.canva.editor", cv)
+        if "canva" in sel:
+            _bulk_usage(cur, user_id, "com.canva.editor", cv)
 
         # Amazon (Prime) — clear month-over-month decline
         am = []
         for i, d in enumerate(all_days):
             m = max(8, int(72 - i * 0.75) + rnd.randint(0, 8))
             am.append((d, m, max(1, m // 22), m // 5 if d.weekday() >= 5 else 0))
-        _bulk_usage(cur, user_id, "in.amazon.mShop.android.shopping", am)
+        if "amazon_prime" in sel:
+            _bulk_usage(cur, user_id, "in.amazon.mShop.android.shopping", am)
+
+        # Hotstar / Notion / Adobe — moderate usage when user adds them
+        if "hotstar" in sel:
+            hs = [(d, 40 + rnd.randint(0, 20), 2, 0) for d in all_days]
+            _bulk_usage(cur, user_id, "in.startv.hotstar", hs)
+        if "notion" in sel:
+            no = [(d, 25 + rnd.randint(0, 15), 1, 0) for d in all_days]
+            _bulk_usage(cur, user_id, "com.notion.android", no)
+        if "adobe" in sel:
+            ad = [(d, 10 + rnd.randint(0, 8), 1, 0) for d in all_days]
+            _bulk_usage(cur, user_id, "com.adobe.reader", ad)
 
         common = dict(
             billing_cycle="MONTHLY",
@@ -223,15 +286,20 @@ def run_seed_for_user(conn: PgConnection, user_id: int, *, wipe_device: bool = T
 
         # (merchant, amount, category, icat, package, is_pro, days_until_billing, reminder_tier)
         rows = [
-            ("Netflix India", 649, "Entertainment", "video", "com.netflix.mediaclient", False, 3, 1),
-            ("Spotify Premium", 119, "Entertainment", "music", "com.spotify.music", False, 8, 1),
-            ("Amazon Prime", 1499 / 12, "Entertainment", "video", "in.amazon.mShop.android.shopping", False, 10, 2),
-            ("YouTube Premium", 129, "Entertainment", "music", "com.google.android.youtube", False, 2, 1),
-            ("LinkedIn Premium", 999, "Finance & Investment", "professional", "com.linkedin.android", False, 15, 2),
-            ("ChatGPT Plus", 1999, "Bills & Utilities", "productivity", "com.openai.chatgpt", False, 12, 2),
-            ("Canva Pro", 499, "Bills & Utilities", "productivity", "com.canva.editor", False, 4, 1),
+            ("Netflix India", 649, "Entertainment", "video", "com.netflix.mediaclient", False, 3, 1, "netflix"),
+            ("Spotify Premium", 119, "Entertainment", "music", "com.spotify.music", False, 8, 1, "spotify"),
+            ("Amazon Prime", 1499 / 12, "Entertainment", "video", "in.amazon.mShop.android.shopping", False, 10, 2, "amazon_prime"),
+            ("YouTube Premium", 129, "Entertainment", "music", "com.google.android.youtube", False, 2, 1, "youtube"),
+            ("LinkedIn Premium", 999, "Finance & Investment", "professional", "com.linkedin.android", False, 15, 2, "linkedin"),
+            ("ChatGPT Plus", 1999, "Bills & Utilities", "productivity", "com.openai.chatgpt", False, 12, 2, "chatgpt"),
+            ("Canva Pro", 499, "Bills & Utilities", "productivity", "com.canva.editor", False, 4, 1, "canva"),
+            ("Hotstar", 299, "Entertainment", "video", "in.startv.hotstar", False, 6, 1, "hotstar"),
+            ("Notion Plus", 650, "Bills & Utilities", "productivity", "com.notion.android", False, 9, 1, "notion"),
+            ("Adobe Creative Cloud", 1675, "Bills & Utilities", "productivity", "com.adobe.reader", False, 11, 1, "adobe"),
         ]
-        for merchant, amt, cat, icat, pkg, is_pro, bill_offset, reminder_tier in rows:
+        for merchant, amt, cat, icat, pkg, is_pro, bill_offset, reminder_tier, app_key in rows:
+            if app_key not in sel and pkg not in allowed_pkgs:
+                continue
             nb = today + timedelta(days=bill_offset)
             _upsert_sub_row(
                 cur,
@@ -255,13 +323,7 @@ def run_seed_for_user(conn: PgConnection, user_id: int, *, wipe_device: bool = T
                 reminder_escalation_tier=reminder_tier,
             )
 
-        cur.execute("SELECT id FROM subscriptions WHERE user_id=%s ORDER BY id;", (user_id,))
-        ids = [r[0] for r in cur.fetchall()]
-        for sid in ids:
-            vr = evaluate_subscription(conn, sid)
-            if vr is not None:
-                persist_verdict(conn, sid, vr)
-                schedule_reminders_for_subscription(conn, sid)
-        apply_reminder_showcase_variety(conn, user_id)
     finally:
         cur.close()
+    _eval_linked_subscriptions(conn, user_id, allowed_pkgs)
+    apply_reminder_showcase_variety(conn, user_id)

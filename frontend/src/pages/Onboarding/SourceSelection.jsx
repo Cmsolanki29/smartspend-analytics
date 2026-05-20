@@ -6,14 +6,38 @@ import {
   UPLOAD_HINT,
   uploadFinancialDocument,
 } from "../../services/documentUpload";
+import { dispatchDataUpdated } from "../../utils/refetchAll";
 
 const BANKS = [
   { id: "HDFC", name: "HDFC Bank", emoji: "🏦" },
   { id: "SBI", name: "State Bank of India", emoji: "🏛️" },
   { id: "ICICI", name: "ICICI Bank", emoji: "🏦" },
-  { id: "Axis", name: "Axis Bank", emoji: "🏦" },
-  { id: "Kotak", name: "Kotak Mahindra", emoji: "🏦" },
+  { id: "AXIS", name: "Axis Bank", emoji: "🏦" },
+  { id: "KOTAK", name: "Kotak Mahindra", emoji: "🏦" },
+  { id: "PNB", name: "Punjab National Bank", emoji: "🏛️" },
+  { id: "BOB", name: "Bank of Baroda", emoji: "🏦" },
 ];
+
+async function apiLinkBankDemo({ bankSlug, bankName, accountLast4 }) {
+  const token = getAccessToken();
+  const res = await fetch(`/api/onboarding/link-bank-demo`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify({
+      bank_slug: bankSlug,
+      bank_name: bankName || undefined,
+      account_last4: accountLast4 || undefined,
+    }),
+  });
+  if (!res.ok) {
+    const d = await res.json().catch(() => ({}));
+    throw new Error(d.detail || d.message || "Could not link bank");
+  }
+  return res.json();
+}
 
 async function apiSetMode({ userId, dashboard_mode, bank_name, onboarding_source }) {
   const token = getAccessToken();
@@ -37,8 +61,8 @@ async function apiSetMode({ userId, dashboard_mode, bank_name, onboarding_source
   return res.json();
 }
 
-export default function SourceSelection({ userId, onComplete, onBack }) {
-  const [screen, setScreen] = useState("main"); // main | bank_picker | pdf_upload | success
+export default function SourceSelection({ userId, userDisplayName, onComplete, onBack }) {
+  const [screen, setScreen] = useState("main"); // main | bank_picker | bank_linked | pdf_upload | success
   const [activeOption, setActiveOption] = useState(null);
   const [selectedBank, setSelectedBank] = useState(null);
   const [uploadFile, setUploadFile] = useState(null);
@@ -46,6 +70,7 @@ export default function SourceSelection({ userId, onComplete, onBack }) {
   const [accountLast4, setAccountLast4] = useState("");
   const [busy, setBusy] = useState(false);
   const [uploadResult, setUploadResult] = useState(null);
+  const [bankLinkResult, setBankLinkResult] = useState(null);
   const [error, setError] = useState("");
 
   const clearError = () => setError("");
@@ -63,23 +88,55 @@ export default function SourceSelection({ userId, onComplete, onBack }) {
     }
   }
 
-  async function handleBankLink() {
-    if (!selectedBank) { setError("Please select a bank first"); return; }
+  async function handleBankLinkDemo() {
+    if (!selectedBank) {
+      setError("Please select a bank first");
+      return;
+    }
     setBusy(true);
     clearError();
     try {
-      await apiSetMode({
-        userId,
-        dashboard_mode: "bank_only",
-        bank_name: selectedBank,
-        onboarding_source: "bank",
+      const bank = BANKS.find((b) => b.id === selectedBank);
+      const data = await apiLinkBankDemo({
+        bankSlug: selectedBank,
+        bankName: bank?.name || selectedBank,
+        accountLast4: accountLast4.trim() || undefined,
       });
-      onComplete();
+      setInstitutionName(bank?.name || data.bank_name || selectedBank);
+      setBankLinkResult(data);
+      setScreen("bank_linked");
+      const sy = Number(data?.statement_year);
+      const sm = Number(data?.statement_month);
+      if (sy > 0 && sm >= 1 && sm <= 12) {
+        window.dispatchEvent(
+          new CustomEvent("smartspend:set-view-month", {
+            detail: { year: sy, month: sm, user_id: Number(userId) },
+          })
+        );
+      }
+      dispatchDataUpdated({
+        userId,
+        sourceName: data.bank_name,
+        month: sm >= 1 && sm <= 12 ? sm : undefined,
+        year: sy > 0 ? sy : undefined,
+      });
     } catch (e) {
       setError(e.message);
     } finally {
       setBusy(false);
     }
+  }
+
+  function handleBankContinueToUpload() {
+    if (!selectedBank) {
+      setError("Please select a bank first");
+      return;
+    }
+    const bank = BANKS.find((b) => b.id === selectedBank);
+    setInstitutionName(bank?.name || selectedBank);
+    setActiveOption("bank_statement");
+    setScreen("pdf_upload");
+    clearError();
   }
 
   async function handlePDFUpload() {
@@ -98,6 +155,13 @@ export default function SourceSelection({ userId, onComplete, onBack }) {
         addedVia: "onboarding_upload",
         apiBase: "/api",
       });
+      const imported = Number(data?.imported ?? data?.transactions_stored ?? 0);
+      const extracted = Number(data?.extracted ?? data?.transactions_extracted ?? 0);
+      if (imported === 0 && extracted === 0) {
+        throw new Error(
+          "We could not find transactions in this file. Try a PDF or CSV export from your bank app."
+        );
+      }
       await apiSetMode({
         userId,
         dashboard_mode: isCard ? "credit_card_only" : "bank_only",
@@ -128,7 +192,13 @@ export default function SourceSelection({ userId, onComplete, onBack }) {
           <div className="mt-4">
             <UploadResultSummary result={uploadResult} variant="signup" />
           </div>
-          <p className="mt-4 text-sm text-slate-400">Your financial insights are ready.</p>
+          <p className="mt-4 text-sm text-slate-400">
+            {imported > 0 && uploadResult?.statement_month
+              ? `Dashboard will open on ${uploadResult.statement_month}/${uploadResult.statement_year}.`
+              : imported > 0
+                ? "Dashboard will show your latest statement month."
+                : "Connected — add another statement in Settings if needed."}
+          </p>
           <button
             type="button"
             onClick={onComplete}
@@ -138,6 +208,91 @@ export default function SourceSelection({ userId, onComplete, onBack }) {
           </button>
         </div>
       </div>
+    );
+  }
+
+  // ── Bank linked (ghost pool preview) ─────────────────────────────────────
+  if (screen === "bank_linked" && bankLinkResult) {
+    const preview = bankLinkResult.preview || [];
+    const label = userDisplayName || bankLinkResult.display_name || "You";
+    return (
+      <PageShell
+        onBack={() => {
+          setScreen("bank_picker");
+          clearError();
+        }}
+      >
+        <h2 className="mb-1 text-2xl font-bold text-white">Account linked</h2>
+        <p className="mb-4 max-w-sm text-sm text-slate-400">
+          Your <span className="text-violet-300">{bankLinkResult.bank_name}</span> account is linked to{" "}
+          <span className="text-violet-300">{label}</span>. These are your recent transactions.
+        </p>
+        <div className="w-full max-w-md overflow-hidden rounded-xl border border-white/10 bg-white/[0.04]">
+          <div className="border-b border-white/10 px-4 py-2 text-xs font-medium uppercase tracking-wide text-slate-500">
+            Recent transactions
+          </div>
+          <ul className="max-h-64 divide-y divide-white/5 overflow-y-auto text-left text-sm">
+            {preview.length === 0 ? (
+              <li className="px-4 py-6 text-center text-slate-500">Loading preview…</li>
+            ) : (
+              preview.map((tx, i) => (
+                <li key={`${tx.date}-${tx.merchant}-${i}`} className="flex items-center justify-between gap-2 px-4 py-2.5">
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate font-medium text-white">{tx.merchant}</p>
+                    <p className="text-xs text-slate-500">{tx.date} · {tx.category}</p>
+                  </div>
+                  <span
+                    className={
+                      tx.type === "CREDIT"
+                        ? "shrink-0 font-semibold text-emerald-400"
+                        : "shrink-0 font-semibold text-slate-200"
+                    }
+                  >
+                    {tx.type === "CREDIT" ? "+" : "−"}₹{Number(tx.amount).toLocaleString("en-IN")}
+                  </span>
+                </li>
+              ))
+            )}
+          </ul>
+        </div>
+        <p className="mt-3 max-w-sm text-xs text-slate-500">
+          {bankLinkResult.total_transactions} transactions synced to your account
+          {bankLinkResult.workspace?.emi_count != null
+            ? ` · ${bankLinkResult.workspace.emi_count} EMI(s) · ${bankLinkResult.workspace.fraud_count ?? 0} fraud alert(s)`
+            : ""}
+        </p>
+        {error && <p className="mt-2 text-sm text-red-400">{error}</p>}
+        <button
+          type="button"
+          onClick={async () => {
+            setBusy(true);
+            try {
+              await apiSetMode({
+                userId,
+                dashboard_mode: "bank_only",
+                bank_name: institutionName,
+                onboarding_source: "bank_ghost_link",
+              });
+              onComplete();
+            } catch (e) {
+              setError(e.message);
+            } finally {
+              setBusy(false);
+            }
+          }}
+          disabled={busy}
+          className="mt-5 w-full max-w-sm rounded-xl bg-gradient-to-r from-violet-600 via-fuchsia-600 to-pink-600 py-3 text-base font-semibold text-white transition hover:opacity-90 disabled:opacity-40"
+        >
+          {busy ? "Opening dashboard…" : "Go to Dashboard →"}
+        </button>
+        <button
+          type="button"
+          onClick={handleBankContinueToUpload}
+          className="mt-3 text-sm text-violet-300 underline-offset-2 hover:underline"
+        >
+          Upload real statement (optional)
+        </button>
+      </PageShell>
     );
   }
 
@@ -152,7 +307,9 @@ export default function SourceSelection({ userId, onComplete, onBack }) {
         }}
       >
         <h2 className="mb-1 text-2xl font-bold text-white">Select Your Bank</h2>
-        <p className="mb-6 text-sm text-slate-400">Choose your primary bank account</p>
+        <p className="mb-6 text-sm text-slate-400">
+          Pick any bank — we link realistic day-to-day spends under that account name.
+        </p>
         <div className="grid w-full max-w-sm grid-cols-2 gap-3">
           {BANKS.map((b) => (
             <button
@@ -173,11 +330,19 @@ export default function SourceSelection({ userId, onComplete, onBack }) {
         {error && <p className="mt-3 text-sm text-red-400">{error}</p>}
         <button
           type="button"
-          onClick={handleBankLink}
+          onClick={handleBankLinkDemo}
           disabled={!selectedBank || busy}
           className="mt-5 w-full max-w-sm rounded-xl bg-gradient-to-r from-violet-600 via-fuchsia-600 to-pink-600 py-3 text-base font-semibold text-white transition hover:opacity-90 disabled:opacity-40"
         >
-          {busy ? "Linking…" : "Link Bank & Continue →"}
+          {busy ? "Linking account…" : "Link my bank account →"}
+        </button>
+        <button
+          type="button"
+          onClick={handleBankContinueToUpload}
+          disabled={!selectedBank || busy}
+          className="mt-3 w-full max-w-sm rounded-xl border border-white/15 py-2.5 text-sm font-medium text-slate-300 transition hover:border-violet-500/40"
+        >
+          Upload statement instead
         </button>
         <SkipBtn onClick={handleSkip} busy={busy} />
       </PageShell>
@@ -287,7 +452,7 @@ export default function SourceSelection({ userId, onComplete, onBack }) {
           <OptionCard
             icon="🏦"
             title="Link Bank Account"
-            desc="Full tracking — salary, EMIs, expenses"
+            desc="Pick your bank, then upload a statement (PDF/CSV)"
             badge="Recommended"
             onClick={() => { setActiveOption("bank"); setScreen("bank_picker"); }}
           />

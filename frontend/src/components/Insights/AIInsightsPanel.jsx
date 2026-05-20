@@ -12,7 +12,7 @@ import {
   ThumbsUp,
   Zap,
 } from "lucide-react";
-import { fetchInsightsSse, invalidateInsightsCache } from "../../services/api";
+import { fetchInsightsSse, getInsightsFast, invalidateInsightsCache } from "../../services/api";
 import { ErrorCard } from "../common/ErrorCard";
 import { GlassCard } from "../intro/GlassCard";
 import { SkeletonCard } from "../common/SkeletonCard";
@@ -101,18 +101,55 @@ function ChatBubble({ title, body, icon: Icon, tone = "neutral", expanded, onTog
   );
 }
 
+function insightsCacheKey(userId, month, year, scope) {
+  return `ss-insights-v1:${userId}:${year}-${month}:${scope || "merged"}`;
+}
+
+function readInsightsCache(userId, month, year, scope) {
+  try {
+    const raw = sessionStorage.getItem(insightsCacheKey(userId, month, year, scope));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed?.insights) return parsed;
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+function writeInsightsCache(userId, month, year, scope, payload) {
+  try {
+    if (payload?.insights) {
+      sessionStorage.setItem(insightsCacheKey(userId, month, year, scope), JSON.stringify(payload));
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
 const AIInsightsPanel = ({ userId, month, year, scope = "merged", presentation = "default" }) => {
   const reduce = useReducedMotion();
   const abortRef = React.useRef(null);
-  const [state, setState] = useState({
-    data: null,
-    loading: true,
-    error: "",
-    refreshedAt: null,
-    streamingPulse: false,
+  const mountedRef = React.useRef(true);
+  const [state, setState] = useState(() => {
+    const cached = userId ? readInsightsCache(userId, month, year, scope) : null;
+    return {
+      data: cached,
+      loading: !cached,
+      error: "",
+      refreshedAt: cached ? new Date() : null,
+      streamingPulse: false,
+    };
   });
   const [typedDone, setTypedDone] = useState(false);
   const [whyOpen, setWhyOpen] = useState(false);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const resetAndFetch = useCallback(
     async ({ refresh = false } = {}) => {
@@ -120,42 +157,28 @@ const AIInsightsPanel = ({ userId, month, year, scope = "merged", presentation =
       const ctrl = new AbortController();
       abortRef.current = ctrl;
 
-      setState({
-        data: null,
+      const cached = !refresh ? readInsightsCache(userId, month, year, scope) : null;
+      setState((prev) => ({
+        data: cached || (refresh ? null : prev.data),
         loading: true,
         error: "",
-        refreshedAt: null,
+        refreshedAt: cached ? new Date() : prev.refreshedAt,
         streamingPulse: false,
-      });
-      setTypedDone(false);
+      }));
+      setTypedDone(Boolean(cached));
       setWhyOpen(false);
 
-      try {
-        if (refresh) {
-          await invalidateInsightsCache(userId, { month, year, scope }).catch(() => {});
+      if (refresh) {
+        try {
+          await invalidateInsightsCache(userId, { month, year, scope });
+        } catch {
+          /* ignore */
         }
-      } catch {
-        /* ignore */
       }
 
-      const onEvent = (evt) => {
-        if (evt && (evt.pulse === true || evt.status === "analyzing")) {
-          setState((prev) => ({ ...prev, streamingPulse: true }));
-        }
-      };
-      const runOnce = async () =>
-        fetchInsightsSse(
-          userId,
-          month,
-          year,
-          (e) => {
-            onEvent(e);
-          },
-          { scope, signal: ctrl.signal, refresh }
-        );
-
-      try {
-        const data = await runOnce();
+      const applyOk = (data) => {
+        if (!mountedRef.current || ctrl.signal.aborted) return;
+        writeInsightsCache(userId, month, year, scope, data);
         setState({
           data,
           loading: false,
@@ -163,27 +186,51 @@ const AIInsightsPanel = ({ userId, month, year, scope = "merged", presentation =
           refreshedAt: new Date(),
           streamingPulse: false,
         });
+      };
+
+      try {
+        const data = await getInsightsFast(userId, month, year, scope);
+        applyOk(data);
+        return;
       } catch {
+        /* fall through to SSE */
+      }
+
+      const onEvent = (evt) => {
+        if (evt && (evt.pulse === true || evt.status === "analyzing")) {
+          setState((prev) => ({ ...prev, streamingPulse: true }));
+        }
+      };
+
+      const delays = [0, 600, 1500];
+      for (let i = 0; i < delays.length; i += 1) {
+        if (ctrl.signal.aborted) return;
+        if (delays[i] > 0) await new Promise((r) => setTimeout(r, delays[i]));
         try {
-          await new Promise((r) => setTimeout(r, 2000));
-          const data = await runOnce();
-          setState({
-            data,
-            loading: false,
-            error: "",
-            refreshedAt: new Date(),
-            streamingPulse: false,
+          const data = await fetchInsightsSse(userId, month, year, onEvent, {
+            scope,
+            signal: ctrl.signal,
+            refresh: refresh && i === 0,
           });
+          applyOk(data);
+          return;
         } catch {
-          setState({
-            data: null,
-            loading: false,
-            error: "Insights are taking longer than usual. Try refreshing.",
-            refreshedAt: null,
-            streamingPulse: false,
-          });
+          /* retry */
         }
       }
+
+      setState((prev) => {
+        if (prev.data?.insights) {
+          return { ...prev, loading: false, error: "", streamingPulse: false };
+        }
+        return {
+          data: null,
+          loading: false,
+          error: "Insights are taking longer than usual. Try refreshing.",
+          refreshedAt: null,
+          streamingPulse: false,
+        };
+      });
     },
     [userId, month, year, scope]
   );
@@ -199,16 +246,23 @@ const AIInsightsPanel = ({ userId, month, year, scope = "merged", presentation =
   }, [resetAndFetch, scope]);
 
   useEffect(() => {
-    const handler = () => resetAndFetch({ refresh: true });
+    let debounceId = null;
+    const handler = () => {
+      window.clearTimeout(debounceId);
+      debounceId = window.setTimeout(() => resetAndFetch({ refresh: false }), 2500);
+    };
     window.addEventListener("dashboardModeChanged", handler);
     window.addEventListener("smartspend:health-score-changed", handler);
     window.addEventListener("smartspend:purchase-goals-changed", handler);
     window.addEventListener("smartspend-financial-sync", handler);
+    window.addEventListener("smartspend:festival-plans-changed", handler);
     return () => {
+      window.clearTimeout(debounceId);
       window.removeEventListener("dashboardModeChanged", handler);
       window.removeEventListener("smartspend:health-score-changed", handler);
       window.removeEventListener("smartspend:purchase-goals-changed", handler);
       window.removeEventListener("smartspend-financial-sync", handler);
+      window.removeEventListener("smartspend:festival-plans-changed", handler);
     };
   }, [resetAndFetch]);
 
@@ -224,10 +278,10 @@ const AIInsightsPanel = ({ userId, month, year, scope = "merged", presentation =
     return `${mins} min ago`;
   }, [state.refreshedAt]);
 
-  const keyInsights = Array.isArray(insight.key_insights) ? insight.key_insights : [];
-  const warnings = Array.isArray(insight.warnings) ? insight.warnings : [];
-  const recommendations = Array.isArray(insight.recommendations) ? insight.recommendations : [];
-  const positives = Array.isArray(insight.positive_highlights) ? insight.positive_highlights : [];
+  const keyInsights = (Array.isArray(insight.key_insights) ? insight.key_insights : []).slice(0, 2);
+  const warnings = (Array.isArray(insight.warnings) ? insight.warnings : []).slice(0, 1);
+  const recommendations = (Array.isArray(insight.recommendations) ? insight.recommendations : []).slice(0, 2);
+  const positives = (Array.isArray(insight.positive_highlights) ? insight.positive_highlights : []).slice(0, 1);
   const priorityActions = Array.isArray(insight.priority_actions) ? insight.priority_actions : [];
   const quickWins = Array.isArray(insight.quick_wins) ? insight.quick_wins : [];
   const budgetSuggestion =

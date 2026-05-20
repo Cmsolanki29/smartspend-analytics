@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   deleteFestivalImportantDay,
+  deleteFestivalPlan,
   getFestivals,
   getFestivalEventDetails,
   getFestivalImportantDays,
@@ -17,6 +18,7 @@ import { ErrorCard } from "../common/ErrorCard";
 import { SkeletonCard } from "../common/SkeletonCard";
 import { PageHeader } from "../Dashboard/shared/PageHeader";
 import { inr } from "../../lib/format";
+import { syncHealthScoreAfterMutation } from "../../utils/financialSync";
 
 const ACCENT = "#EC4899";
 
@@ -51,11 +53,10 @@ const urgencyDot = (u) => {
 function dispatchPlannerSync(userId) {
   try {
     window.dispatchEvent(new CustomEvent("smartspend:festival-plans-changed", { detail: { userId } }));
-    window.dispatchEvent(new CustomEvent("smartspend:purchase-goals-changed", { detail: { userId } }));
-    window.dispatchEvent(new CustomEvent("smartspend-financial-sync", { detail: { userId } }));
   } catch {
     /* ignore */
   }
+  syncHealthScoreAfterMutation(userId).catch(() => {});
 }
 
 function mergeFestCardIntoData(prev, card) {
@@ -133,6 +134,7 @@ const FestivalPredictor = ({ userId }) => {
   const [eventModal, setEventModal] = useState(null);
   const [savingEvent, setSavingEvent] = useState(false);
   const [togglingReminderId, setTogglingReminderId] = useState(null);
+  const [deletingFestKey, setDeletingFestKey] = useState(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -384,6 +386,23 @@ const FestivalPredictor = ({ userId }) => {
     }
   };
 
+  const confirmDeleteFestPlan = async (f) => {
+    const label = f.festival_name || "this event";
+    if (!window.confirm(`Remove “${label}” from your festival planner?`)) return;
+    const cardKey = festCardKey(f);
+    setDeletingFestKey(cardKey);
+    try {
+      await deleteFestivalPlan(userId, f.festival_name, f.festival_date);
+      showToast("Event plan removed");
+      await load();
+      dispatchPlannerSync(userId);
+    } catch (e) {
+      showToast(e.message || "Could not remove plan", "error");
+    } finally {
+      setDeletingFestKey(null);
+    }
+  };
+
   const confirmDeleteDay = async (d) => {
     if (!window.confirm(`Remove “${d.title}” from your planner?`)) return;
     setDeletingId(d.id);
@@ -495,7 +514,6 @@ const FestivalPredictor = ({ userId }) => {
   };
 
   const upcoming = (data?.upcoming_festivals || []).map(mergeFestWithDetails);
-  const next = data?.next_festival;
   const nf = upcoming[0];
 
   const mergedTimelineItems = useMemo(() => {
@@ -846,11 +864,6 @@ const FestivalPredictor = ({ userId }) => {
                 id={`fest-card-${cardKey}`}
                 className={`glass-card planner-card-v2 ${isOpen ? "is-expanded" : ""} ${highlightFest === cardKey ? "ring-2 ring-pink-400/50" : ""}`}
               >
-                {(f.linked_goals || []).length > 0 && (
-                  <div className="planner-link-banner fest">
-                    🔗 Linked: {(f.linked_goals || []).map((g) => g.item_name).join(", ")}
-                  </div>
-                )}
                 <header
                   className="planner-card-head-v2"
                   onClick={() => toggleExpand(f)}
@@ -911,6 +924,14 @@ const FestivalPredictor = ({ userId }) => {
                   </div>
                   <button type="button" className="btn-outline" onClick={() => toggleExpand(f)}>
                     {isOpen ? "Hide ▲" : "Details ▼"}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-outline text-rose-300/90 border-rose-500/30 hover:bg-rose-500/10"
+                    disabled={deletingFestKey === cardKey}
+                    onClick={() => confirmDeleteFestPlan(f)}
+                  >
+                    {deletingFestKey === cardKey ? "Removing…" : "Remove plan"}
                   </button>
                 </div>
                 {isOpen && (

@@ -55,18 +55,36 @@ export default function InsightsTab({ userId, month, year, setActiveTab }) {
     return () => window.removeEventListener("dashboardModeChanged", handler);
   }, [fetchHealth]);
 
-  // Re-fetch health score whenever financial data changes (new account, new EMI, new goal, etc.)
+  // Re-fetch health score whenever EMI / planner / festival data changes (real-time).
   useEffect(() => {
-    const handler = () => fetchHealth();
+    const handler = (e) => {
+      const d = e?.detail;
+      if (d?.userId != null && Number(d.userId) === Number(userId) && d.score != null) {
+        setHealth((prev) => ({
+          ...(prev || {}),
+          score: d.score,
+          grade: d.grade ?? prev?.grade,
+          trend: d.trend ?? prev?.trend,
+          health_band: d.health_band ?? prev?.health_band,
+          health_label: d.health_label ?? prev?.health_label,
+          reason: undefined,
+        }));
+        setHealthError(false);
+        setHealthLoading(false);
+      }
+      fetchHealth();
+    };
     window.addEventListener("smartspend:health-score-changed", handler);
     window.addEventListener("smartspend:purchase-goals-changed", handler);
     window.addEventListener("smartspend-financial-sync", handler);
+    window.addEventListener("smartspend:festival-plans-changed", handler);
     return () => {
       window.removeEventListener("smartspend:health-score-changed", handler);
       window.removeEventListener("smartspend:purchase-goals-changed", handler);
       window.removeEventListener("smartspend-financial-sync", handler);
+      window.removeEventListener("smartspend:festival-plans-changed", handler);
     };
-  }, [fetchHealth]);
+  }, [fetchHealth, userId]);
 
   const savingsRate =
     health?.savings_rate ?? health?.components?.savings_rate_pct ?? null;
@@ -92,6 +110,7 @@ export default function InsightsTab({ userId, month, year, setActiveTab }) {
         purchases: "purchase",
         insights: "insights",
         health: "insights",
+        settings: "settings",
         "trip-planner": "trip-planner",
       };
       if (route?.tab && tabById[route.tab] && typeof setActiveTab === "function") {
@@ -116,6 +135,7 @@ export default function InsightsTab({ userId, month, year, setActiveTab }) {
         "/purchase": "purchase",
         "/insights": "insights",
         "/health": "insights",
+        "/settings": "settings",
         "/trip-planner": "trip-planner",
       };
       const tab = tabByPath[base];
@@ -140,9 +160,11 @@ export default function InsightsTab({ userId, month, year, setActiveTab }) {
                 ? undefined
                 : insufficientData
                   ? health?.message || "Upload more statements to unlock your Health Score"
-                  : savingsRate != null
-                    ? `${Number(savingsRate).toFixed(1)}% savings rate this month`
-                    : undefined
+                  : health?.health_label
+                    ? `${health.health_label} · ${Number(savingsRate ?? 0).toFixed(1)}% savings`
+                    : savingsRate != null
+                      ? `${Number(savingsRate).toFixed(1)}% savings rate this month`
+                      : undefined
             }
             captionLoading={healthLoading}
             delta={

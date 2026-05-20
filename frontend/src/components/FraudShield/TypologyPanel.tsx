@@ -1,4 +1,4 @@
-﻿import React, { useState } from "react";
+import React, { useState } from "react";
 import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
 import type { TypologyData, TypologyId } from "./mockData";
 import { CHAINVAULT } from "./chainVaultTheme";

@@ -92,6 +92,15 @@ export async function uploadFinancialDocument({
         sourceName: data?.source_name || data?.institution || institutionName,
       });
     }
+    const sy = Number(data?.statement_year);
+    const sm = Number(data?.statement_month);
+    if (imported > 0 && sy > 0 && sm >= 1 && sm <= 12) {
+      window.dispatchEvent(
+        new CustomEvent("smartspend:set-view-month", {
+          detail: { year: sy, month: sm, user_id: Number(userId) },
+        })
+      );
+    }
   }
   return data;
 }

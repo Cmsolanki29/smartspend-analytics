@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from db import get_db
-from routes.emi_detector import _infer_monthly_income
+from routes.emi_detector import _infer_monthly_income, _next_due_date
 from services.dashboard_scope import resolve_scope_mode, transaction_scope_sql
 
 router = APIRouter(prefix="/financial-summary", tags=["financial-summary"])
@@ -41,7 +42,7 @@ def get_financial_summary(
 
         cur.execute(
             """
-            SELECT merchant, detected_amount, emi_type, is_active, next_due_date
+            SELECT merchant, detected_amount, emi_type, is_active, payment_date
             FROM emi_records
             WHERE user_id = %s AND COALESCE(is_active, TRUE) = TRUE
             ORDER BY detected_amount DESC
@@ -49,16 +50,20 @@ def get_financial_summary(
             (user_id,),
         )
         emi_rows = cur.fetchall()
-        active_emis = [
-            {
-                "merchant": r[0],
-                "monthly_amount": float(r[1] or 0),
-                "emi_type": r[2],
-                "status": "active",
-                "next_due": str(r[4]) if r[4] else None,
-            }
-            for r in emi_rows
-        ]
+        today = date.today()
+        active_emis = []
+        for r in emi_rows:
+            payment_day = int(r[4] or 1)
+            next_due = _next_due_date(payment_day, today).isoformat()
+            active_emis.append(
+                {
+                    "merchant": r[0],
+                    "monthly_amount": float(r[1] or 0),
+                    "emi_type": r[2],
+                    "status": "active",
+                    "next_due": next_due,
+                }
+            )
         monthly_emi_total = sum(e["monthly_amount"] for e in active_emis)
 
         festival_reserved = 0.0

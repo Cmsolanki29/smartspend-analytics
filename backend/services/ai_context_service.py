@@ -20,6 +20,19 @@ from services.dashboard_scope import normalize_dashboard_mode, transaction_scope
 _log = logging.getLogger(__name__)
 
 _CACHE_TTL_MINUTES = 10
+_LEDGER_LOOKBACK_DAYS = 90
+_RECURRING_MERCHANT_HINTS = (
+    "netflix",
+    "spotify",
+    "prime video",
+    "hotstar",
+    "youtube",
+    "apple.com",
+    "google play",
+    "microsoft",
+    "adobe",
+    "linkedin",
+)
 
 
 def _rollback_conn(conn) -> None:
@@ -300,8 +313,9 @@ def resolve_identity_scope(
             "scope": "unlinked_foreign",
             "reason": "different_person",
             "warning_message": (
-                f"Hello {user_name}, it seems this is not your account document. "
-                f"I'll still give you a summary."
+                f"Hey {(user_name or 'there').split()[0]}, this statement looks like it belongs to someone else — "
+                f"I'll only use it for a **short** preview of that file. "
+                f"Ask about **your linked account** anytime for personalised insights."
             ),
             "nudge_message": "Please link your account in Connected Accounts.",
             "linked_bank_names": linked_bank_names,
@@ -375,7 +389,42 @@ def extract_all_amounts_from_context(context_packet: dict) -> list[float]:
     for sub in context_packet.get("subscriptions") or []:
         _add(sub.get("amount"))
 
+    su = context_packet.get("session_upload") or {}
+    for txn in su.get("transactions") or []:
+        _add(txn.get("amount"))
+    hp = su.get("health_preview") or {}
+    for k in ("total_debits", "total_credits", "net", "top_spending_amount"):
+        _add(hp.get(k))
+
     return amounts
+
+
+def invalidate_user_ai_context_cache(user_id: int) -> None:
+    """Clear cached context for all AI sessions belonging to this user (after ledger upload)."""
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE ai_sessions
+            SET cached_context = NULL,
+                context_built_at = NULL,
+                cache_dashboard_scope = NULL,
+                cache_context_month = NULL,
+                cache_context_year = NULL
+            WHERE user_id = %s
+            """,
+            (user_id,),
+        )
+        conn.commit()
+    except Exception as e:
+        _log.warning("[ai_context] user cache invalidate failed: %s", e)
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+        conn.close()
 
 
 def invalidate_session_context_cache(session_id: str) -> None:
@@ -545,23 +594,53 @@ def merge_session_upload_into_packet(packet: dict[str, Any], session_id: str | N
             }
             for t in txns[:50]
         ]
-        if scope == "unlinked_foreign":
+        ledger_authority = (packet.get("data_authority") or "") in (
+            "ledger_month",
+            "ledger_90d",
+            "latest_ledger_upload",
+        )
+        has_ledger_txns = bool(packet.get("recent_transactions")) and ledger_authority
+
+        if scope == "unlinked_foreign" and not has_ledger_txns:
             packet["recent_transactions"] = session_txn_view
+            packet["active_emis"] = []
+            packet["subscriptions"] = _recurring_services_from_transactions(txns)
+        elif scope == "unlinked_foreign" and has_ledger_txns:
+            packet["session_upload"]["transactions"] = session_txn_view
         else:
             packet["recent_transactions"] = session_txn_view + (packet.get("recent_transactions") or [])
             packet["recent_transactions"] = packet["recent_transactions"][:50]
 
         hp = ctx.get("health_preview") or {}
-        if hp and scope in ("unlinked_foreign", "unlinked_same_bank"):
+        if hp and scope in ("unlinked_foreign", "unlinked_same_bank") and not has_ledger_txns:
             packet["monthly_summary"] = {
-                **(packet.get("monthly_summary") or {}),
                 "expense": hp.get("total_debits", 0),
                 "income": hp.get("total_credits", 0),
                 "savings": hp.get("net", 0),
                 "savings_rate": hp.get("savings_rate_pct", 0),
                 "period_label": doc_info.get("statement_period") or packet.get("period_label"),
                 "source": "session_upload",
+                "transaction_count": len(txns),
             }
+            packet["has_data"] = True
+            packet["data_authority"] = "session_upload"
+        elif hp and scope in ("unlinked_foreign", "unlinked_same_bank") and has_ledger_txns:
+            packet["session_upload"]["monthly_summary"] = {
+                "expense": hp.get("total_debits", 0),
+                "income": hp.get("total_credits", 0),
+                "savings": hp.get("net", 0),
+                "savings_rate": hp.get("savings_rate_pct", 0),
+                "period_label": doc_info.get("statement_period"),
+                "source": "session_upload",
+                "transaction_count": len(txns),
+            }
+
+        if scope in ("unlinked_foreign", "unlinked_same_bank", "linked_full"):
+            upload_subs = _recurring_services_from_transactions(txns)
+            if scope == "unlinked_foreign" and has_ledger_txns:
+                packet["session_upload"]["subscriptions"] = upload_subs
+            else:
+                packet["subscriptions"] = upload_subs or packet.get("subscriptions") or []
 
     return packet
 
@@ -660,6 +739,198 @@ def get_or_build_context_packet(
     return merge_session_upload_into_packet(packet, session_id)
 
 
+def _txn_dict_from_row(row: tuple) -> dict[str, Any]:
+    return {
+        "merchant": row[0] or "Unknown",
+        "category": row[1],
+        "amount": float(row[2] or 0),
+        "date": str(row[3]),
+        "type": (row[4] or "DEBIT").upper(),
+        "source": row[5] or "linked_bank",
+    }
+
+
+def _fetch_scoped_transactions(
+    cur: Any,
+    user_id: int,
+    scope_sql: str,
+    *,
+    month: int | None = None,
+    year: int | None = None,
+    days: int | None = None,
+    connected_source_id: int | None = None,
+    uploaded_document_id: int | None = None,
+    limit: int = 80,
+) -> list[dict[str, Any]]:
+    clauses = ["t.user_id = %s", f"({scope_sql})"]
+    params: list[Any] = [user_id]
+
+    if connected_source_id is not None:
+        clauses.append("t.connected_source_id = %s")
+        params.append(connected_source_id)
+    if uploaded_document_id is not None:
+        clauses.append("t.uploaded_document_id = %s")
+        params.append(uploaded_document_id)
+    if month is not None and year is not None:
+        clauses.append("EXTRACT(MONTH FROM t.transaction_date)::int = %s")
+        clauses.append("EXTRACT(YEAR FROM t.transaction_date)::int = %s")
+        params.extend([month, year])
+    elif days is not None:
+        clauses.append("t.transaction_date >= (CURRENT_DATE - (%s || ' days')::interval)")
+        params.append(int(days))
+
+    params.append(limit)
+    cur.execute(
+        f"""
+        SELECT COALESCE(NULLIF(TRIM(merchant), ''), NULLIF(TRIM(description), ''), 'Unknown'),
+               category, amount, transaction_date, type,
+               'linked_bank'
+        FROM transactions t
+        WHERE {' AND '.join(clauses)}
+        ORDER BY transaction_date DESC
+        LIMIT %s
+        """,
+        tuple(params),
+    )
+    return [_txn_dict_from_row(r) for r in cur.fetchall()]
+
+
+def _summary_from_transactions(
+    txns: list[dict[str, Any]],
+    *,
+    period_label: str,
+    period_key: str,
+    source: str,
+) -> dict[str, Any]:
+    total_income = 0.0
+    total_expense = 0.0
+    categories: dict[str, float] = {}
+    for t in txns:
+        amt = float(t.get("amount") or 0)
+        typ = str(t.get("type") or "DEBIT").upper()
+        if typ == "CREDIT":
+            total_income += amt
+        else:
+            total_expense += amt
+            cat = str(t.get("category") or "Other")
+            categories[cat] = categories.get(cat, 0.0) + amt
+    savings = total_income - total_expense
+    savings_rate = round(savings / total_income * 100, 2) if total_income > 0 else 0.0
+    return {
+        "income": round(total_income, 2),
+        "expense": round(total_expense, 2),
+        "savings": round(savings, 2),
+        "savings_rate": savings_rate,
+        "categories": categories,
+        "period": period_key,
+        "period_label": period_label,
+        "source": source,
+        "transaction_count": len(txns),
+    }
+
+
+def _recurring_services_from_transactions(txns: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for t in txns:
+        if str(t.get("type", "DEBIT")).upper() != "DEBIT":
+            continue
+        label = str(t.get("merchant") or "")
+        low = label.lower()
+        if not any(h in low for h in _RECURRING_MERCHANT_HINTS):
+            continue
+        key = low[:48]
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({
+            "service": label[:80],
+            "amount": float(t.get("amount") or 0),
+            "billing_date": t.get("date"),
+            "status": "from_statement",
+        })
+    return out[:10]
+
+
+def _fetch_latest_ledger_upload(cur: Any, user_id: int) -> dict[str, Any] | None:
+    try:
+        cur.execute(
+            """
+            SELECT ud.id, ud.file_name, ud.uploaded_at, ud.connected_source_id,
+                   COALESCE(ud.rows_imported, 0), cs.institution_name, cs.source_type
+            FROM uploaded_documents ud
+            LEFT JOIN connected_sources cs ON cs.id = ud.connected_source_id
+            WHERE ud.user_id = %s
+            ORDER BY ud.uploaded_at DESC NULLS LAST, ud.id DESC
+            LIMIT 1
+            """,
+            (user_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        doc_id = int(row[0])
+        holder: str | None = None
+        try:
+            cur.execute(
+                """
+                SELECT raw_extracted_text
+                FROM extraction_results
+                WHERE uploaded_document_id = %s
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (doc_id,),
+            )
+            er = cur.fetchone()
+            if er and er[0]:
+                holder = detect_holder_in_text(str(er[0]))
+        except Exception:
+            pass
+        return {
+            "document_id": doc_id,
+            "filename": row[1],
+            "uploaded_at": str(row[2]) if row[2] else None,
+            "connected_source_id": int(row[3]) if row[3] is not None else None,
+            "rows_imported": int(row[4] or 0),
+            "institution": row[5],
+            "source_type": row[6],
+            "account_holder_name": holder,
+        }
+    except Exception as e:
+        _rollback_conn(cur.connection)
+        _log.warning("[ai_context] latest_ledger_upload fetch error: %s", e)
+        return None
+
+
+def build_context_prompt_rules(context: dict[str, Any]) -> str:
+    """Grounding rules appended to the chat system prompt."""
+    user_name = (context.get("user") or {}).get("name") or context.get("user_name") or "there"
+    has_data = bool(context.get("has_data"))
+    authority = context.get("data_authority") or "none"
+    latest = context.get("latest_ledger_upload") or {}
+    holder = latest.get("account_holder_name")
+    lines = [
+        "═══ CONTEXT GROUNDING (MANDATORY) ═══",
+        f"1. Greet the logged-in user as: {user_name} (from their account — never invent another name).",
+        "2. Use ONLY numbers and merchants listed in the CONTEXT PACKET in the user message.",
+        "3. NEVER cite profile monthly_income unless the packet says no ledger data exists.",
+        "4. Do NOT mention rent, salary, Spotify, or any merchant not present in recent_transactions.",
+    ]
+    if not has_data:
+        lines.append(
+            "5. This user has no scoped ledger rows yet — say so and suggest uploading via Connected Accounts."
+        )
+    else:
+        lines.append(f"5. Data authority: {authority} — prefer latest_ledger_upload / session_upload over stale profile.")
+    if holder and holder.lower() != str(user_name).lower():
+        lines.append(
+            f"6. Latest statement holder on file: {holder}. "
+            f"Describe that statement's spends; do not claim they are {user_name}'s salary/profile income."
+        )
+    return "\n".join(lines)
+
+
 def build_context_packet(
     user_id: int,
     session_id: str | None = None,
@@ -683,10 +954,20 @@ def build_context_packet(
 
     conn = get_connection()
     cur = None
+    user_data: dict[str, Any] = {}
+    planning_snapshot: dict[str, Any] = {}
+    has_data = False
+    data_authority = "none"
+    recent_txns: list[dict] = []
+    monthly_summary: dict = {}
+    latest_ledger_upload = None
+    connected_sources: list[dict] = []
+    linked_accounts: list[dict] = []
+    subscriptions: list[dict] = []
+    active_emis: list[dict] = []
+    uploaded_docs: list[dict] = []
     try:
         cur = conn.cursor()
-
-        user_data: dict[str, Any] = {}
         try:
             cur.execute(
                 """
@@ -698,9 +979,10 @@ def build_context_packet(
             )
             row = cur.fetchone()
             if row:
+                profile_income = float(row[3] or 0)
                 user_data = {
-                    "name": row[1],
-                    "monthly_income": float(row[3] or 0),
+                    "name": (row[1] or "").strip() or "there",
+                    "profile_monthly_income": profile_income if profile_income > 0 else None,
                     "savings_goal": float(row[4] or 0),
                     "risk_tolerance": row[5],
                 }
@@ -709,7 +991,7 @@ def build_context_packet(
             _log.warning("[ai_context] user fetch error: %s", e)
 
         connected_sources = _fetch_connected_sources(cur, user_id)
-        linked_accounts: list[dict] = [
+        linked_accounts = [
             {
                 "bank": s["institution_name"],
                 "source_type": s.get("source_type"),
@@ -718,147 +1000,140 @@ def build_context_packet(
             for s in connected_sources
         ]
 
-        recent_txns: list[dict] = []
+        latest_ledger_upload = _fetch_latest_ledger_upload(cur, user_id)
+
         try:
-            cur.execute(
-                f"""
-                SELECT merchant, category, amount, transaction_date, type,
-                       COALESCE(document_origin, 'linked_bank') AS data_source
-                FROM transactions t
-                WHERE t.user_id = %s
-                  AND EXTRACT(MONTH FROM t.transaction_date)::int = %s
-                  AND EXTRACT(YEAR FROM t.transaction_date)::int = %s
-                  AND ({scope})
-                ORDER BY transaction_date DESC
-                LIMIT 50
-                """,
-                (user_id, month, year),
-            )
-            for r in cur.fetchall():
-                recent_txns.append({
-                    "merchant": r[0],
-                    "category": r[1],
-                    "amount": float(r[2] or 0),
-                    "date": str(r[3]),
-                    "type": r[4],
-                    "source": r[5] or "linked_bank",
-                })
+            primary_txns: list[dict] = []
+            if latest_ledger_upload and int(latest_ledger_upload.get("rows_imported") or 0) > 0:
+                src_id = latest_ledger_upload.get("connected_source_id")
+                doc_id = latest_ledger_upload.get("document_id")
+                if src_id:
+                    primary_txns = _fetch_scoped_transactions(
+                        cur,
+                        user_id,
+                        scope,
+                        days=_LEDGER_LOOKBACK_DAYS,
+                        connected_source_id=src_id,
+                        limit=80,
+                    )
+                if not primary_txns and doc_id:
+                    primary_txns = _fetch_scoped_transactions(
+                        cur,
+                        user_id,
+                        scope,
+                        days=_LEDGER_LOOKBACK_DAYS,
+                        uploaded_document_id=doc_id,
+                        limit=80,
+                    )
+                if primary_txns:
+                    data_authority = "latest_ledger_upload"
+                    inst = latest_ledger_upload.get("institution") or "linked account"
+                    recent_txns = primary_txns[:50]
+                    monthly_summary = _summary_from_transactions(
+                        primary_txns,
+                        period_label=f"Latest upload ({inst})",
+                        period_key="latest_upload",
+                        source="latest_ledger_upload",
+                    )
+
+            if not recent_txns:
+                month_txns = _fetch_scoped_transactions(
+                    cur, user_id, scope, month=month, year=year, limit=50
+                )
+                if month_txns:
+                    recent_txns = month_txns
+                    data_authority = "ledger_month"
+                    monthly_summary = _summary_from_transactions(
+                        month_txns,
+                        period_label=period_label,
+                        period_key=f"{year}-{month:02d}",
+                        source="ledger_month",
+                    )
+                else:
+                    rolling_txns = _fetch_scoped_transactions(
+                        cur, user_id, scope, days=_LEDGER_LOOKBACK_DAYS, limit=80
+                    )
+                    if rolling_txns:
+                        recent_txns = rolling_txns[:50]
+                        data_authority = "ledger_90d"
+                        monthly_summary = _summary_from_transactions(
+                            rolling_txns,
+                            period_label=f"Last {_LEDGER_LOOKBACK_DAYS} days",
+                            period_key="rolling_90d",
+                            source="ledger_90d",
+                        )
         except Exception as e:
             _rollback_conn(conn)
             _log.warning("[ai_context] transactions fetch error: %s", e)
 
-        monthly_summary: dict = {}
-        try:
-            cur.execute(
-                f"""
-                SELECT
-                    COALESCE(SUM(CASE WHEN t.type = 'CREDIT' THEN t.amount ELSE 0 END), 0)::float,
-                    COALESCE(SUM(CASE WHEN t.type = 'DEBIT' THEN t.amount ELSE 0 END), 0)::float
-                FROM transactions t
-                WHERE t.user_id = %s
-                  AND EXTRACT(MONTH FROM t.transaction_date)::int = %s
-                  AND EXTRACT(YEAR FROM t.transaction_date)::int = %s
-                  AND ({scope})
-                """,
-                (user_id, month, year),
-            )
-            inc, exp = cur.fetchone() or (0, 0)
-            total_income = float(inc or 0)
-            total_expense = float(exp or 0)
-            savings = total_income - total_expense
-            savings_rate = (
-                round(savings / total_income * 100, 2) if total_income > 0 else 0.0
-            )
+        has_data = len(recent_txns) > 0
 
-            categories: dict[str, float] = {}
-            cur.execute(
-                f"""
-                SELECT COALESCE(category, 'Other') AS cat,
-                       COALESCE(SUM(t.amount), 0)::float
-                FROM transactions t
-                WHERE t.user_id = %s
-                  AND t.type = 'DEBIT'
-                  AND EXTRACT(MONTH FROM t.transaction_date)::int = %s
-                  AND EXTRACT(YEAR FROM t.transaction_date)::int = %s
-                  AND ({scope})
-                GROUP BY COALESCE(category, 'Other')
-                ORDER BY 2 DESC
-                LIMIT 12
-                """,
-                (user_id, month, year),
-            )
-            for r in cur.fetchall():
-                categories[str(r[0])] = float(r[1] or 0)
+        if has_data:
+            subscriptions = _recurring_services_from_transactions(recent_txns)
+        else:
+            try:
+                cur.execute(
+                    """
+                    SELECT
+                        COALESCE(merchant, 'Unknown') AS lender,
+                        COALESCE(detected_amount, 0) AS emi_amount,
+                        payment_date,
+                        COALESCE(months_detected, 0) AS months_remaining
+                    FROM emi_records
+                    WHERE user_id = %s AND is_active IS TRUE
+                    ORDER BY payment_date ASC NULLS LAST
+                    LIMIT 10
+                    """,
+                    (user_id,),
+                )
+                for r in cur.fetchall():
+                    active_emis.append({
+                        "lender": r[0],
+                        "amount": float(r[1] or 0),
+                        "next_due": str(r[2]) if r[2] else None,
+                        "remaining_months": int(r[3] or 0),
+                    })
+            except Exception as e:
+                _rollback_conn(conn)
+                _log.warning("[ai_context] emi_records fetch error: %s", e)
 
-            monthly_summary = {
-                "income": total_income,
-                "expense": total_expense,
-                "savings": savings,
-                "savings_rate": savings_rate,
-                "categories": categories,
-                "period": f"{year}-{month:02d}",
-                "period_label": period_label,
-            }
-        except Exception as e:
-            _rollback_conn(conn)
-            _log.warning("[ai_context] monthly_summary compute error: %s", e)
+            try:
+                cur.execute(
+                    """
+                    SELECT
+                        COALESCE(merchant, 'Unknown') AS service,
+                        COALESCE(NULLIF(monthly_cost, 0), amount, 0)::double precision AS amount,
+                        COALESCE(last_charged, first_charged) AS billing_date,
+                        COALESCE(status, 'active') AS status
+                    FROM subscriptions
+                    WHERE user_id = %s
+                      AND (status IS NULL OR LOWER(status) NOT IN ('cancelled', 'pending_cancel'))
+                    ORDER BY 3 ASC NULLS LAST
+                    LIMIT 10
+                    """,
+                    (user_id,),
+                )
+                for r in cur.fetchall():
+                    subscriptions.append({
+                        "service": r[0],
+                        "amount": float(r[1] or 0),
+                        "billing_date": str(r[2]) if r[2] else None,
+                        "status": r[3],
+                    })
+            except Exception as e:
+                _rollback_conn(conn)
+                _log.warning("[ai_context] subscriptions fetch error: %s", e)
 
-        active_emis: list[dict] = []
-        try:
-            cur.execute(
-                """
-                SELECT
-                    COALESCE(merchant, 'Unknown') AS lender,
-                    COALESCE(detected_amount, 0) AS emi_amount,
-                    payment_date,
-                    COALESCE(months_detected, 0) AS months_remaining
-                FROM emi_records
-                WHERE user_id = %s AND is_active IS TRUE
-                ORDER BY payment_date ASC NULLS LAST
-                LIMIT 10
-                """,
-                (user_id,),
-            )
-            for r in cur.fetchall():
-                active_emis.append({
-                    "lender": r[0],
-                    "amount": float(r[1] or 0),
-                    "next_due": str(r[2]) if r[2] else None,
-                    "remaining_months": int(r[3] or 0),
-                })
-        except Exception as e:
-            _rollback_conn(conn)
-            _log.warning("[ai_context] emi_records fetch error: %s", e)
-
-        subscriptions: list[dict] = []
-        try:
-            cur.execute(
-                """
-                SELECT
-                    COALESCE(merchant, 'Unknown') AS service,
-                    COALESCE(NULLIF(monthly_cost, 0), amount, 0)::double precision AS amount,
-                    COALESCE(last_charged, first_charged) AS billing_date,
-                    COALESCE(status, 'active') AS status
-                FROM subscriptions
-                WHERE user_id = %s
-                  AND (status IS NULL OR LOWER(status) NOT IN ('cancelled', 'pending_cancel'))
-                ORDER BY 3 ASC NULLS LAST
-                LIMIT 10
-                """,
-                (user_id,),
-            )
-            for r in cur.fetchall():
-                subscriptions.append({
-                    "service": r[0],
-                    "amount": float(r[1] or 0),
-                    "billing_date": str(r[2]) if r[2] else None,
-                    "status": r[3],
-                })
-        except Exception as e:
-            _rollback_conn(conn)
-            _log.warning("[ai_context] subscriptions fetch error: %s", e)
-
-        uploaded_docs: list[dict] = []
+        if latest_ledger_upload:
+            uploaded_docs.append({
+                "file": latest_ledger_upload.get("filename"),
+                "institution": latest_ledger_upload.get("institution"),
+                "type": latest_ledger_upload.get("source_type"),
+                "is_current_ledger": True,
+                "account_holder_name": latest_ledger_upload.get("account_holder_name"),
+                "rows_imported": latest_ledger_upload.get("rows_imported"),
+                "uploaded_at": latest_ledger_upload.get("uploaded_at"),
+            })
         if session_id:
             try:
                 cur.execute(
@@ -889,6 +1164,27 @@ def build_context_packet(
                 _rollback_conn(conn)
                 _log.warning("[ai_context] document_uploads fetch error: %s", e)
 
+        try:
+            from services.financial_behavior import fetch_planning_snapshot
+
+            income_basis = float((monthly_summary or {}).get("income") or 0)
+            if income_basis <= 0:
+                income_basis = float(user_data.get("profile_monthly_income") or 0)
+            planning_snapshot = fetch_planning_snapshot(cur, user_id, income_basis=income_basis)
+        except Exception as e:
+            _rollback_conn(conn)
+            _log.warning("[ai_context] planning_snapshot fetch error: %s", e)
+
+        _log.info(
+            "[ai_context] build user_id=%s name=%s has_data=%s authority=%s txn_count=%s upload=%s",
+            user_id,
+            user_data.get("name"),
+            has_data,
+            data_authority,
+            len(recent_txns),
+            (latest_ledger_upload or {}).get("filename"),
+        )
+
     finally:
         if cur is not None:
             try:
@@ -897,10 +1193,16 @@ def build_context_packet(
                 pass
         conn.close()
 
+    user_name = (user_data.get("name") or "there").strip()
     return {
         "user_id": user_id,
+        "user_name": user_name,
+        "has_data": has_data,
+        "planning_snapshot": planning_snapshot,
+        "data_authority": data_authority,
         "user": user_data,
         "linked_accounts": linked_accounts,
+        "latest_ledger_upload": latest_ledger_upload,
         "monthly_summary": monthly_summary,
         "recent_transactions": recent_txns,
         "active_emis": active_emis,
@@ -910,6 +1212,12 @@ def build_context_packet(
         "context_month": month,
         "context_year": year,
         "period_label": period_label,
+        "grounding_note": (
+            "All figures below are from the user's scoped ledger/upload — "
+            "do not use profile_monthly_income or demo personas."
+            if has_data
+            else "No scoped ledger rows — do not invent amounts or merchants."
+        ),
         "app_features": [
             {"name": "EMI Tracker", "route": "/emi-tracker", "tab": "emi",
              "description": "Track all EMIs, due dates, lenders"},
