@@ -262,6 +262,22 @@ const App = () => {
   const [month, setMonth] = useState(today.getMonth() + 1);
   const [year, setYear] = useState(today.getFullYear());
 
+  /** After statement upload: jump TopBar to statement month (not stuck on today). */
+  useEffect(() => {
+    const onViewMonth = (e) => {
+      const uid = Number(e?.detail?.user_id);
+      const y = Number(e?.detail?.year);
+      const m = Number(e?.detail?.month);
+      if (workspaceUserId > 0 && uid > 0 && uid !== workspaceUserId) return;
+      if (y > 2000 && m >= 1 && m <= 12) {
+        setYear(y);
+        setMonth(m);
+      }
+    };
+    window.addEventListener("smartspend:set-view-month", onViewMonth);
+    return () => window.removeEventListener("smartspend:set-view-month", onViewMonth);
+  }, [workspaceUserId]);
+
   const selectedUser = user;
 
   useEffect(() => {
@@ -371,6 +387,21 @@ const App = () => {
               /* ignore */
             }
             setNeedsSourceSelection(false);
+            setActiveTab("dashboard");
+            try {
+              const url = new URL(window.location.href);
+              if (
+                url.pathname.endsWith("/fraud-shield") ||
+                url.pathname.endsWith("/chain-vault") ||
+                url.pathname.endsWith("/fraud")
+              ) {
+                url.pathname = "/";
+                const q = url.searchParams.toString();
+                window.history.replaceState({}, "", `${url.pathname}${q ? `?${q}` : ""}${url.hash}`);
+              }
+            } catch {
+              /* ignore */
+            }
           }}
         />
       </ToastProvider>

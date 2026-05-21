@@ -164,7 +164,7 @@ export default function SourceSelection({ userId, userDisplayName, onComplete, o
       }
       await apiSetMode({
         userId,
-        dashboard_mode: isCard ? "credit_card_only" : "bank_only",
+        dashboard_mode: "merged",
         onboarding_source: isCard ? "credit_card" : "bank_statement",
       });
       setUploadResult(data);
